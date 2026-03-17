@@ -38,12 +38,18 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from typing import Optional
 import asyncio
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
 
 import rir_client
 import cache as cache_module
@@ -97,10 +103,22 @@ app = FastAPI(
     },
 )
 
-# Allow all origins for public demo use
+# B1 — Rate limiting: protects upstream RIRs from being hammered by abusive clients.
+# Default: 60 req/min per IP. Heavy endpoints (org audit, health) use 10/min.
+# Override with PEERGLASS_RATE_LIMIT env var (e.g. "120/minute").
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+_DEFAULT_RATE = os.environ.get("PEERGLASS_RATE_LIMIT", "60/minute")
+_HEAVY_RATE   = os.environ.get("PEERGLASS_RATE_LIMIT_HEAVY", "10/minute")
+
+# B2 — CORS: restrict allowed origins in production via env var.
+# Set PEERGLASS_ALLOWED_ORIGINS="https://yourdomain.com,https://other.com"
+# Defaults to "*" (open) when env var is absent — suitable for local/demo use.
+_cors_env = os.environ.get("PEERGLASS_ALLOWED_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -162,13 +180,15 @@ async def root():
 
 
 @app.get("/v1/meta/cache", tags=["Meta"], summary="Cache statistics")
-async def meta_cache():
+@limiter.limit(_DEFAULT_RATE)
+async def meta_cache(request: Request):
     """Returns the current in-memory cache health: total entries, alive, expired."""
     return cache_module.stats()
 
 
 @app.get("/v1/meta/status", tags=["Meta"], summary="RIR server reachability")
-async def meta_status():
+@limiter.limit(_DEFAULT_RATE)
+async def meta_status(request: Request):
     """Pings all 5 RIR RDAP servers and returns their status."""
     statuses = await rir_client.check_all_rir_status()
     return [s.model_dump() for s in statuses]
@@ -184,7 +204,9 @@ async def meta_status():
     summary="Who owns this IP address?",
     response_description="Registration info from the authoritative RIR",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def query_ip(
+    request: Request,
     ip: str,
     format: str = FORMAT_QUERY,
 ):
@@ -205,6 +227,11 @@ async def query_ip(
     resources = [normalize_ip_response(r) for r in results if r.status == "ok"]
 
     if not resources:
+        # J3: RDAP returned nothing — try raw WHOIS port-43 fallback
+        whois_result = await rir_client.get_whois_fallback(ip, "ip")
+        if whois_result:
+            resources = [normalize_ip_response(whois_result)]
+    if not resources:
         raise HTTPException(status_code=404, detail=f"No RDAP record found for {ip}")
 
     query_result = RIRQueryResult(query=ip, query_type="ip", results=resources)
@@ -219,7 +246,9 @@ async def query_ip(
     tags=["RDAP"],
     summary="Who owns this Autonomous System Number?",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def query_asn(
+    request: Request,
     asn: str,
     format: str = FORMAT_QUERY,
 ):
@@ -239,6 +268,11 @@ async def query_asn(
     resources = [normalize_asn_response(r) for r in results if r.status == "ok"]
 
     if not resources:
+        # J3: RDAP returned nothing — try raw WHOIS port-43 fallback
+        whois_result = await rir_client.get_whois_fallback(asn, "asn")
+        if whois_result:
+            resources = [normalize_asn_response(whois_result)]
+    if not resources:
         raise HTTPException(status_code=404, detail=f"No RDAP record found for {asn}")
 
     query_result = RIRQueryResult(query=asn, query_type="asn", results=resources)
@@ -253,7 +287,9 @@ async def query_asn(
     tags=["RDAP"],
     summary="Who do I report abuse to for this IP?",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def get_abuse_contact(
+    request: Request,
     ip: str,
     format: str = FORMAT_QUERY,
 ):
@@ -284,7 +320,9 @@ async def get_abuse_contact(
     tags=["Routing Security"],
     summary="Is this BGP route RPKI valid?",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def check_rpki(
+    request: Request,
     prefix: str = Query(..., description="IP prefix in CIDR notation, e.g. '1.1.1.0/24'"),
     asn: str    = Query(..., description="Origin ASN, e.g. 'AS13335' or '13335'"),
     format: str = FORMAT_QUERY,
@@ -316,7 +354,9 @@ async def check_rpki(
     tags=["Routing Security"],
     summary="Is this prefix/ASN visible in global BGP?",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def check_bgp(
+    request: Request,
     resource: str,
     format: str = FORMAT_QUERY,
 ):
@@ -345,7 +385,9 @@ async def check_bgp(
     tags=["Routing Security"],
     summary="What prefixes is this ASN announcing?",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def get_announced(
+    request: Request,
     asn: str,
     format: str = FORMAT_QUERY,
 ):
@@ -373,7 +415,9 @@ async def get_announced(
     tags=["RDAP"],
     summary="Find all internet resources for an organization",
 )
+@limiter.limit(_HEAVY_RATE)
 async def audit_org(
+    request: Request,
     name: str = Query(..., description="Organization name or handle, e.g. 'Cloudflare' or 'GOOGL-ARIN'"),
     format: str = FORMAT_QUERY,
 ):
@@ -415,7 +459,9 @@ async def audit_org(
     tags=["History"],
     summary="Full registration history for a prefix or ASN",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def prefix_history(
+    request: Request,
     resource: str,
     format: str = FORMAT_QUERY,
 ):
@@ -442,7 +488,9 @@ async def prefix_history(
     tags=["History"],
     summary="Detect cross-org or cross-RIR resource transfers",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def detect_transfers(
+    request: Request,
     resource: str,
     format: str = FORMAT_QUERY,
 ):
@@ -469,7 +517,9 @@ async def detect_transfers(
     tags=["Statistics"],
     summary="Global IPv4 / IPv6 / ASN exhaustion dashboard",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def ipv4_stats(
+    request: Request,
     rir: Optional[str] = Query(
         default=None,
         description="Filter to one RIR: AFRINIC, APNIC, ARIN, LACNIC, or RIPE. Leave empty for all 5.",
@@ -538,7 +588,9 @@ async def ipv4_stats(
     tags=["History"],
     summary="Prefix hierarchy: parent blocks, children, and BGP status",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def prefix_overview(
+    request: Request,
     prefix: str,
     format: str = FORMAT_QUERY,
 ):
@@ -569,7 +621,9 @@ async def prefix_overview(
     tags=["PeeringDB"],
     summary="PeeringDB: peering policy, IXP presence, NOC contacts",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def peering_info(
+    request: Request,
     asn: str,
     format: str = FORMAT_QUERY,
 ):
@@ -597,7 +651,9 @@ async def peering_info(
     tags=["PeeringDB"],
     summary="Find Internet Exchange Points by country or name",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def ixp_lookup(
+    request: Request,
     query: str = Query(..., description="2-letter country code (e.g. 'MU') or IXP name fragment (e.g. 'AMS-IX')"),
     format: str = FORMAT_QUERY,
 ):
@@ -623,7 +679,9 @@ async def ixp_lookup(
     tags=["Health"],
     summary="One-shot health check: RDAP + BGP + RPKI + PeeringDB",
 )
+@limiter.limit(_HEAVY_RATE)
 async def network_health(
+    request: Request,
     resource: str,
     format: str = FORMAT_QUERY,
 ):
@@ -654,7 +712,9 @@ async def network_health(
     tags=["Monitor"],
     summary="Monitor registration + BGP changes between calls",
 )
+@limiter.limit(_DEFAULT_RATE)
 async def change_monitor(
+    request: Request,
     resource: str,
     reset: bool = Query(
         default=False,
@@ -698,7 +758,8 @@ async def change_monitor(
     tags=["Meta"],
     summary="OpenAI / Gemini function-calling tool definitions",
 )
-async def openai_tools():
+@limiter.limit(_DEFAULT_RATE)
+async def openai_tools(request: Request):
     """
     Returns the tool definitions in OpenAI function-calling format.
     Paste these directly into your ChatGPT/Gemini system prompt or

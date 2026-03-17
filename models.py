@@ -240,6 +240,24 @@ class BGPPrefix(BaseModel):
     is_more_specific: Optional[bool]   = None
 
 
+class BGPCommunity(BaseModel):
+    """A single BGP community value attached to a route announcement."""
+    asn: int
+    value: int
+    description: Optional[str] = None
+
+
+# Well-known BGP communities (RFC 1997, RFC 7999) decoded to human-readable descriptions.
+# Keyed by (asn, value) tuples.
+BGP_WELL_KNOWN_COMMUNITIES: dict[tuple[int, int], str] = {
+    (65535, 65281): "NO_EXPORT — do not advertise beyond this AS boundary",
+    (65535, 65282): "NO_ADVERTISE — do not advertise to any BGP peer",
+    (65535, 65283): "NO_EXPORT_SUBCONFED — do not advertise outside local confederation",
+    (65535, 666):   "BLACKHOLE (RFC 7999) — discard traffic, do not forward",
+    (65535, 65284): "NOPEER — do not export to peer AS (RFC 3765)",
+}
+
+
 class BGPStatusResult(BaseModel):
     """BGP routing table status for a prefix or ASN resource."""
     resource: str
@@ -248,6 +266,7 @@ class BGPStatusResult(BaseModel):
     announcing_asns: List[str]          = Field(default_factory=list)
     announced_prefixes: List[BGPPrefix] = Field(default_factory=list)
     visibility_percent: Optional[float] = None
+    communities: List[BGPCommunity]     = Field(default_factory=list)
     source: str                         = "RIPE Stat"
     queried_at: Optional[str]          = None
 

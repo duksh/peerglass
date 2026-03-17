@@ -19,12 +19,14 @@ The parallel engine is the core of this server:
 from __future__ import annotations
 import asyncio
 import ipaddress
+import socket
 import time
 from typing import Any, Optional
 import httpx
 
-from models import RIRName, RIRQueryResult, RPKIResult, RPKIValidity, BGPStatusResult, BGPPrefix, OrgResource, \
-    HistoricalEvent, PrefixHistoryResult, TransferEvent, TransferDetectResult, \
+from models import RIRName, RIRQueryResult, RPKIResult, RPKIValidity, \
+    BGPStatusResult, BGPPrefix, BGPCommunity, BGP_WELL_KNOWN_COMMUNITIES, \
+    OrgResource, HistoricalEvent, PrefixHistoryResult, TransferEvent, TransferDetectResult, \
     RIRDelegationStats, GlobalIPv4Stats, IPv4DelegatedBlock, RelatedPrefix, PrefixOverviewResult, \
     IXPRecord, PeeringInfoResult, IXPLookupResult, NetworkHealthResult, \
     ChangeMonitorResult, FieldDelta
@@ -100,8 +102,11 @@ DEFAULT_HEADERS = {
     "User-Agent": "peerglass/1.0.0 (PeerGlass RDAP+BGP+RPKI client; educational/research use)",
 }
 
-# Bootstrap data is semi-static — cache in-process for the server lifetime
-_BOOTSTRAP_CACHE: dict[str, Any] = {}
+# Bootstrap data is cached with a 24-hour TTL so long-running servers
+# always use fresh IANA data without needing a restart (A2).
+# Structure: {url: (data_dict, fetched_timestamp)}
+_BOOTSTRAP_CACHE: dict[str, tuple[dict, float]] = {}
+BOOTSTRAP_TTL = 86_400  # 24 hours
 
 
 # ──────────────────────────────────────────────────────────────
@@ -109,16 +114,21 @@ _BOOTSTRAP_CACHE: dict[str, Any] = {}
 # ──────────────────────────────────────────────────────────────
 
 async def _load_bootstrap(url: str, client: httpx.AsyncClient) -> dict:
-    if url in _BOOTSTRAP_CACHE:
-        return _BOOTSTRAP_CACHE[url]
+    """Load IANA bootstrap JSON, refreshing from network if older than 24 h."""
+    cached = _BOOTSTRAP_CACHE.get(url)
+    if cached:
+        data, fetched_at = cached
+        if time.time() - fetched_at < BOOTSTRAP_TTL:
+            return data
     try:
         resp = await client.get(url, timeout=10.0, headers=DEFAULT_HEADERS)
         resp.raise_for_status()
         data = resp.json()
-        _BOOTSTRAP_CACHE[url] = data
+        _BOOTSTRAP_CACHE[url] = (data, time.time())
         return data
     except Exception:
-        return {}
+        # On network failure return stale data if we have it, else empty
+        return cached[0] if cached else {}
 
 
 def _ip4_to_int(ip: str) -> int:
@@ -139,6 +149,23 @@ def _cidr_contains_ip4(cidr: str, ip_int: int) -> bool:
         return False
 
 
+def _ip6_to_int(ip: str) -> int:
+    """Convert an IPv6 address (without prefix) to a 128-bit integer."""
+    return int(ipaddress.ip_address(ip.split("/")[0]))
+
+
+def _cidr_contains_ip6(cidr: str, ip_int: int) -> bool:
+    """Return True if ip_int falls inside the IPv6 CIDR block."""
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+        net_int = int(network.network_address)
+        shift = 128 - network.prefixlen
+        mask = ((1 << 128) - 1) ^ ((1 << shift) - 1)
+        return (ip_int & mask) == (net_int & mask)
+    except Exception:
+        return False
+
+
 async def _find_authoritative_base_url(
     query: str,
     query_type: str,  # "ip" | "asn"
@@ -147,12 +174,23 @@ async def _find_authoritative_base_url(
     """
     Use IANA RDAP Bootstrap to find which RIR is authoritative for a given
     IP address or ASN. Returns the RDAP base URL of that RIR, or None.
+    Supports both IPv4 and IPv6 (A1).
     """
     if query_type == "ip":
         is_v6 = ":" in query
         url = IANA_BOOTSTRAP_IPv6 if is_v6 else IANA_BOOTSTRAP_IPv4
         bootstrap = await _load_bootstrap(url, client)
-        if not is_v6:
+        if is_v6:
+            try:
+                ip_int = _ip6_to_int(query)
+                for service in bootstrap.get("services", []):
+                    cidrs, urls = service[0], service[1]
+                    for cidr in cidrs:
+                        if _cidr_contains_ip6(cidr, ip_int):
+                            return urls[0] if urls else None
+            except Exception:
+                pass
+        else:
             try:
                 ip_int = _ip4_to_int(query.split("/")[0])
                 for service in bootstrap.get("services", []):
@@ -265,6 +303,124 @@ async def query_authoritative_rir(query: str, query_type: str) -> Optional[RIRQu
         if result.status == "ok":
             return result
     return None
+
+
+# ──────────────────────────────────────────────────────────────
+# J3 — WHOIS port-43 fallback
+# ──────────────────────────────────────────────────────────────
+
+# WHOIS server hostnames per RIR (port 43, plain TCP)
+_WHOIS_SERVERS: dict[str, str] = {
+    "AFRINIC": "whois.afrinic.net",
+    "APNIC":   "whois.apnic.net",
+    "ARIN":    "whois.arin.net",
+    "LACNIC":  "whois.lacnic.net",
+    "RIPE":    "whois.ripe.net",
+}
+
+# Map RDAP base URL prefixes to RIR names for WHOIS server selection
+_RDAP_TO_RIR: list[tuple[str, str]] = [
+    ("rdap.afrinic.net", "AFRINIC"),
+    ("rdap.apnic.net",   "APNIC"),
+    ("rdap.arin.net",    "ARIN"),
+    ("rdap.lacnic.net",  "LACNIC"),
+    ("rdap.db.ripe.net", "RIPE"),
+]
+
+
+async def _whois_query(query: str, whois_host: str, timeout: float = 10.0) -> str:
+    """
+    Open a raw TCP connection to whois_host:43, send query+CRLF, read response.
+    Returns the raw WHOIS text or empty string on failure.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(whois_host, 43),
+            timeout=timeout,
+        )
+        writer.write(f"{query}\r\n".encode())
+        await writer.drain()
+        data = await asyncio.wait_for(reader.read(65536), timeout=timeout)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return data.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _parse_whois_to_rdap_like(text: str, resource: str, rir: str) -> dict:
+    """
+    Parse key:value WHOIS text into a minimal RDAP-like dict so the existing
+    normalizer can extract fields from it. Marks source as 'WHOIS fallback'.
+    """
+    fields: dict[str, Any] = {"objectClassName": "ip network", "_whois_fallback": True, "_rir": rir}
+    for line in text.splitlines():
+        if ":" not in line or line.startswith("%"):
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip().lower()
+        val = val.strip()
+        if not val:
+            continue
+        # Map common WHOIS keys to RDAP-like equivalents
+        if key in ("netname", "inetnum", "inet6num", "aut-num", "as-name"):
+            fields.setdefault("name", val)
+        elif key in ("org", "organisation", "orgname", "owner"):
+            fields.setdefault("org_name", val)
+        elif key in ("country",):
+            fields.setdefault("country", val.upper())
+        elif key in ("abuse-mailbox", "orgabuseemail", "abuse-c"):
+            fields.setdefault("abuse_email", val)
+        elif key in ("created", "regdate"):
+            fields.setdefault("created", val)
+        elif key in ("last-modified", "changed", "updated"):
+            fields.setdefault("last_changed", val)
+        elif key in ("status",):
+            fields.setdefault("status", val)
+        elif key in ("netrange", "inetnum"):
+            fields.setdefault("handle", val)
+    # Provide a minimal 'handle' if still missing
+    fields.setdefault("handle", resource)
+    return fields
+
+
+async def get_whois_fallback(resource: str, query_type: str) -> Optional[RIRQueryResult]:
+    """
+    Query the authoritative RIR WHOIS server (port 43) for a resource.
+    Returns a RIRQueryResult with a WHOIS-parsed data dict, or None on failure.
+    Used as a last-resort fallback when all RDAP responses are empty.
+    """
+    async with httpx.AsyncClient() as client:
+        base_url = await _find_authoritative_base_url(resource, query_type, client)
+
+    rir_name = "RIPE"  # default fallback
+    if base_url:
+        for rdap_fragment, rir_key in _RDAP_TO_RIR:
+            if rdap_fragment in base_url:
+                rir_name = rir_key
+                break
+
+    whois_host = _WHOIS_SERVERS.get(rir_name, "whois.ripe.net")
+    text = await _whois_query(resource, whois_host)
+    if not text or text.strip().startswith("%ERROR"):
+        return None
+
+    try:
+        rir_enum = RIRName(rir_name)
+    except ValueError:
+        rir_enum = RIRName.RIPE
+
+    data = _parse_whois_to_rdap_like(text, resource, rir_name)
+    return RIRQueryResult(
+        rir=rir_enum,
+        status="ok",
+        queried_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        data=data,
+    )
 
 
 async def get_rir_server_status() -> dict[RIRName, dict]:
@@ -498,24 +654,39 @@ async def get_bgp_status(resource: str) -> BGPStatusResult:
                         origin_asns.append(origin)
 
                 # Fallback: bgp-state now returns 'bgp_state' instead of 'routes'
+                # Also parse BGP communities from this response (D2).
                 announced_from_bgp_state = False
-                if seeing_peers == 0 and not origin_asns:
-                    bgp_resp = await client.get(RIPE_STAT_BGP_URL, params=params, timeout=15.0, headers=DEFAULT_HEADERS)
-                    if bgp_resp.status_code == 200:
-                        bgp_data = bgp_resp.json().get("data", {})
-                        entries = bgp_data.get("bgp_state") or bgp_data.get("routes") or []
-                        for entry in entries:
-                            if not isinstance(entry, dict):
-                                continue
+                communities_seen: dict[tuple[int, int], BGPCommunity] = {}
+                bgp_resp = await client.get(RIPE_STAT_BGP_URL, params=params, timeout=15.0, headers=DEFAULT_HEADERS)
+                if bgp_resp.status_code == 200:
+                    bgp_data = bgp_resp.json().get("data", {})
+                    entries = bgp_data.get("bgp_state") or bgp_data.get("routes") or []
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        # Extract origin ASN when routing-status didn't find any
+                        if seeing_peers == 0 and not origin_asns:
                             path = entry.get("path")
                             origin_value = path[-1] if isinstance(path, list) and path else entry.get("origin")
-                            if origin_value in (None, ""):
-                                continue
-                            origin = str(origin_value)
-                            origin = origin if origin.upper().startswith("AS") else f"AS{origin}"
-                            if origin not in origin_asns:
-                                origin_asns.append(origin)
-                        announced_from_bgp_state = len(entries) > 0
+                            if origin_value not in (None, ""):
+                                origin = str(origin_value)
+                                origin = origin if origin.upper().startswith("AS") else f"AS{origin}"
+                                if origin not in origin_asns:
+                                    origin_asns.append(origin)
+                        # Parse communities
+                        for comm in entry.get("community", []):
+                            if isinstance(comm, (list, tuple)) and len(comm) == 2:
+                                try:
+                                    c_asn, c_val = int(comm[0]), int(comm[1])
+                                    key = (c_asn, c_val)
+                                    if key not in communities_seen:
+                                        desc = BGP_WELL_KNOWN_COMMUNITIES.get(key)
+                                        communities_seen[key] = BGPCommunity(
+                                            asn=c_asn, value=c_val, description=desc
+                                        )
+                                except (ValueError, TypeError):
+                                    pass
+                    announced_from_bgp_state = len(entries) > 0
 
                 return BGPStatusResult(
                     resource            = resource,
@@ -523,6 +694,7 @@ async def get_bgp_status(resource: str) -> BGPStatusResult:
                     is_announced        = (seeing_peers > 0) or bool(origin_asns) or announced_from_bgp_state,
                     announcing_asns     = origin_asns,
                     visibility_percent  = vis_pct,
+                    communities         = list(communities_seen.values()),
                     queried_at          = queried_at,
                 )
 
