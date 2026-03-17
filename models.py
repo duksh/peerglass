@@ -907,3 +907,119 @@ class DNSPropagationResult(BaseModel):
     total_resolvers: int                     = 0
     entries: List[PropagationEntry]          = Field(default_factory=list)
     errors: List[str]                        = Field(default_factory=list)
+
+
+# ============================================================
+# Sprint 3 — TLS, CT Logs, Threat Intel, Passive DNS
+# ============================================================
+
+# ── F1: TLS Inspection ──────────────────────────────────────
+
+class TLSInspectInput(BaseModel):
+    hostname: str
+    port: int = Field(default=443, ge=1, le=65535)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default) or 'json'",
+    )
+
+class TLSCertResult(BaseModel):
+    hostname:            str
+    port:                int
+    subject:             dict           = Field(default_factory=dict)
+    issuer:              dict           = Field(default_factory=dict)
+    san:                 List[str]      = Field(default_factory=list)
+    not_before:          str            = ""
+    not_after:           str            = ""
+    days_until_expiry:   int            = -1
+    expired:             bool           = True
+    self_signed:         bool           = False
+    cipher_suite:        Optional[str]  = None
+    protocol_version:    Optional[str]  = None
+    chain_length:        int            = 0
+    hsts:                bool           = False
+    hsts_max_age:        Optional[int]  = None
+    error:               Optional[str]  = None
+
+
+# ── F2: Certificate Transparency Logs ───────────────────────
+
+class CTLogInput(BaseModel):
+    domain: str
+    limit: int = Field(default=50, ge=1, le=500)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default) or 'json'",
+    )
+
+class CTLogEntry(BaseModel):
+    id:               int           = 0
+    issuer_cn:        str           = ""
+    common_name:      str           = ""
+    name_value:       str           = ""
+    not_before:       str           = ""
+    not_after:        str           = ""
+    entry_timestamp:  Optional[str] = None
+
+class CTLogResult(BaseModel):
+    domain:          str
+    total_found:     int             = 0
+    returned:        int             = 0
+    entries:         List[CTLogEntry] = Field(default_factory=list)
+    unique_issuers:  List[str]        = Field(default_factory=list)
+    error:           Optional[str]    = None
+
+
+# ── G1: Threat Intelligence ──────────────────────────────────
+
+class ThreatIntelInput(BaseModel):
+    ip: str
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default) or 'json'",
+    )
+
+class ThreatIntelResult(BaseModel):
+    ip:               str
+    # Shodan InternetDB (free, no key required)
+    open_ports:       List[int]      = Field(default_factory=list)
+    vulnerabilities:  List[str]      = Field(default_factory=list)
+    hostnames:        List[str]      = Field(default_factory=list)
+    tags:             List[str]      = Field(default_factory=list)
+    # GreyNoise Community (optional — requires GREYNOISE_API_KEY env var)
+    noise:            Optional[bool] = None   # True = benign internet scanner
+    riot:             Optional[bool] = None   # True = known trusted service
+    classification:   Optional[str]  = None   # malicious / benign / unknown
+    greynoise_name:   Optional[str]  = None
+    greynoise_link:   Optional[str]  = None
+    greynoise_error:  Optional[str]  = None
+    # Aggregated risk
+    risk_score:       int            = 0      # 0–100
+    risk_level:       str            = "LOW"  # LOW / MEDIUM / HIGH / CRITICAL
+    shodan_error:     Optional[str]  = None
+
+
+# ── E6: Passive DNS ─────────────────────────────────────────
+
+class PassiveDNSInput(BaseModel):
+    resource: str
+    limit: int = Field(default=100, ge=1, le=500)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default) or 'json'",
+    )
+
+class PassiveDNSRecord(BaseModel):
+    rrtype:     str = ""
+    rdata:      str = ""
+    time_first: str = ""
+    time_last:  str = ""
+    count:      int = 0
+
+class PassiveDNSResult(BaseModel):
+    resource:         str
+    total:            int                    = 0
+    records:          List[PassiveDNSRecord] = Field(default_factory=list)
+    query_starttime:  Optional[str]          = None
+    query_endtime:    Optional[str]          = None
+    error:            Optional[str]          = None

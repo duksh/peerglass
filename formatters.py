@@ -33,6 +33,10 @@ from models import (
     DNSBLResult,
     EmailSecurityResult,
     DNSPropagationResult,
+    TLSCertResult,
+    CTLogResult,
+    ThreatIntelResult,
+    PassiveDNSResult,
 )
 
 
@@ -1226,5 +1230,180 @@ def format_dns_propagation_md(result: DNSPropagationResult) -> str:
             "> ⏳ DNS changes may take 24–48 hours to fully propagate globally. "
             "TTL values on the old records control how long resolvers cache stale data.\n\n"
         )
+
+    return "".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3 Formatters — TLS (F1), CT Logs (F2), Threat Intel (G1), PDNS (E6)
+# ---------------------------------------------------------------------------
+
+def format_tls_inspect_md(result: TLSCertResult) -> str:
+    lines: list[str] = []
+    lines.append(f"## TLS Certificate: `{result.hostname}:{result.port}`\n\n")
+
+    if result.error and not result.not_after:
+        lines.append(f"> 🚨 **Connection failed:** {result.error}\n\n")
+        return "".join(lines)
+
+    # Expiry status
+    if result.expired:
+        exp_icon = "🚨"
+        exp_note = "**EXPIRED**"
+    elif result.days_until_expiry <= 14:
+        exp_icon = "⚠️"
+        exp_note = f"expires in {result.days_until_expiry}d — renew soon"
+    else:
+        exp_icon = "✅"
+        exp_note = f"valid, {result.days_until_expiry} days remaining"
+
+    lines.append(f"- **Expiry:** {exp_icon} {exp_note}\n")
+    lines.append(f"- **Valid from:** {result.not_before}\n")
+    lines.append(f"- **Valid until:** {result.not_after}\n")
+    lines.append(f"- **Self-signed:** {'Yes ⚠️' if result.self_signed else 'No'}\n")
+    lines.append(f"- **Chain length:** {result.chain_length} cert(s)\n")
+    if result.protocol_version:
+        lines.append(f"- **TLS version:** {result.protocol_version}\n")
+    if result.cipher_suite:
+        lines.append(f"- **Cipher suite:** `{result.cipher_suite}`\n")
+    lines.append(f"- **HSTS:** {'Yes' if result.hsts else 'No'}")
+    if result.hsts and result.hsts_max_age is not None:
+        lines.append(f" (max-age={result.hsts_max_age}s)")
+    lines.append("\n\n")
+
+    if result.subject:
+        lines.append("### Subject\n\n")
+        for k, v in result.subject.items():
+            lines.append(f"- **{k}:** {v}\n")
+        lines.append("\n")
+
+    if result.issuer:
+        lines.append("### Issuer\n\n")
+        for k, v in result.issuer.items():
+            lines.append(f"- **{k}:** {v}\n")
+        lines.append("\n")
+
+    if result.san:
+        lines.append("### Subject Alternative Names\n\n")
+        for name in result.san[:20]:
+            lines.append(f"- `{name}`\n")
+        if len(result.san) > 20:
+            lines.append(f"- *(and {len(result.san) - 20} more)*\n")
+        lines.append("\n")
+
+    if result.error:
+        lines.append(f"> ⚠️ **Note:** {result.error}\n\n")
+
+    return "".join(lines)
+
+
+def format_ct_logs_md(result: CTLogResult) -> str:
+    lines: list[str] = []
+    lines.append(f"## Certificate Transparency Logs: `{result.domain}`\n\n")
+
+    if result.error:
+        lines.append(f"> 🚨 **Error:** {result.error}\n\n")
+        return "".join(lines)
+
+    lines.append(f"- **Total certs found:** {result.total_found}\n")
+    lines.append(f"- **Showing:** {result.returned}\n")
+    lines.append(f"- **Unique CAs:** {len(result.unique_issuers)}\n\n")
+
+    if result.unique_issuers:
+        lines.append("### Certificate Authorities Seen\n\n")
+        for ca in result.unique_issuers[:10]:
+            lines.append(f"- {ca}\n")
+        lines.append("\n")
+
+    if result.entries:
+        lines.append("### Certificate Log Entries\n\n")
+        lines.append("| Common Name | Issuer CA | Not Before | Not After |\n")
+        lines.append("|-------------|-----------|------------|-----------|\n")
+        for e in result.entries[:30]:
+            cn = e.common_name[:40] if e.common_name else "*"
+            ca = e.issuer_cn[:30] if e.issuer_cn else "?"
+            lines.append(f"| `{cn}` | {ca} | {str(e.not_before)[:10]} | {str(e.not_after)[:10]} |\n")
+        if result.returned > 30:
+            lines.append(f"\n*…{result.returned - 30} more entries not shown.*\n")
+        lines.append("\n")
+
+    return "".join(lines)
+
+
+def format_threat_intel_md(result: ThreatIntelResult) -> str:
+    risk_icons = {"LOW": "✅", "MEDIUM": "⚠️", "HIGH": "🚨", "CRITICAL": "🔴"}
+    icon = risk_icons.get(result.risk_level, "❓")
+    lines: list[str] = []
+    lines.append(f"## Threat Intelligence: `{result.ip}`\n\n")
+    lines.append(f"- **Risk:** {icon} **{result.risk_level}** (score: {result.risk_score}/100)\n\n")
+
+    lines.append("### Shodan InternetDB\n\n")
+    if result.shodan_error:
+        lines.append(f"> ⚠️ {result.shodan_error}\n\n")
+    else:
+        lines.append(f"- **Open ports:** {', '.join(f'`{p}`' for p in sorted(result.open_ports)) or 'none found'}\n")
+        if result.hostnames:
+            lines.append(f"- **Hostnames:** {', '.join(result.hostnames[:5])}\n")
+        if result.tags:
+            lines.append(f"- **Tags:** {', '.join(result.tags)}\n")
+        if result.vulnerabilities:
+            lines.append(f"- **CVEs:** {', '.join(result.vulnerabilities[:10])}")
+            if len(result.vulnerabilities) > 10:
+                lines.append(f" *(+{len(result.vulnerabilities) - 10} more)*")
+            lines.append("\n")
+        lines.append("\n")
+
+    lines.append("### GreyNoise Community\n\n")
+    if result.greynoise_error and result.classification is None:
+        lines.append(f"> ℹ️ {result.greynoise_error}\n\n")
+    else:
+        if result.riot:
+            lines.append("> ✅ **RIOT** — this IP belongs to a known trusted service.\n\n")
+        elif result.classification == "malicious":
+            lines.append("> 🚨 **Classified MALICIOUS** by GreyNoise.\n\n")
+        elif result.noise:
+            lines.append("> ℹ️ IP is a **benign internet scanner** (GreyNoise noise = true).\n\n")
+
+        cl = result.classification or "unknown"
+        lines.append(f"- **Classification:** {cl}\n")
+        if result.greynoise_name:
+            lines.append(f"- **Name:** {result.greynoise_name}\n")
+        if result.greynoise_link:
+            lines.append(f"- **Profile:** {result.greynoise_link}\n")
+        lines.append("\n")
+
+    return "".join(lines)
+
+
+def format_passive_dns_md(result: PassiveDNSResult) -> str:
+    lines: list[str] = []
+    lines.append(f"## Passive DNS History: `{result.resource}`\n\n")
+
+    if result.error:
+        lines.append(f"> 🚨 **Error:** {result.error}\n\n")
+        return "".join(lines)
+
+    lines.append(f"- **Total records:** {result.total}\n")
+    if result.query_starttime:
+        lines.append(f"- **Query window start:** {result.query_starttime}\n")
+    if result.query_endtime:
+        lines.append(f"- **Query window end:** {result.query_endtime}\n")
+    lines.append("\n")
+
+    if result.records:
+        lines.append("### DNS History\n\n")
+        lines.append("| Type | Value | First Seen | Last Seen | Count |\n")
+        lines.append("|------|-------|------------|-----------|-------|\n")
+        for rec in result.records[:50]:
+            first = str(rec.time_first)[:10]
+            last  = str(rec.time_last)[:10]
+            lines.append(
+                f"| {rec.rrtype} | `{rec.rdata[:50]}` | {first} | {last} | {rec.count} |\n"
+            )
+        if result.total > 50:
+            lines.append(f"\n*…{result.total - 50} more records not shown.*\n")
+        lines.append("\n")
+    else:
+        lines.append("> No passive DNS records found for this resource.\n\n")
 
     return "".join(lines)

@@ -109,19 +109,19 @@ else:
 
 
 # ── 7. TOOL COUNT ────────────────────────────────────────────
-print("\n7. TOOL COUNT — 23 @mcp.tool() decorators in server.py")
+print("\n7. TOOL COUNT — 27 @mcp.tool() decorators in server.py")
 # Decorator is @mcp.tool( with description kwarg on next line
 tools_found = re.findall(r"@mcp\.tool\(", server_src)
 count = len(tools_found)
-if count == 23:
+if count == 27:
     print(f"   ✅ {count} @mcp.tool() decorators found")
 else:
-    print(f"   ❌ Expected 23, found {count}")
+    print(f"   ❌ Expected 27, found {count}")
     errors.append(f"tool_count:{count}")
 
 
 # ── 8. REST ENDPOINTS ────────────────────────────────────────
-print("\n8. REST API — all 21 endpoints present in api.py")
+print("\n8. REST API — all 25 endpoints present in api.py")
 api_src = open("api.py").read()
 routes = [
     "/v1/ip/{ip}",           "/v1/asn/{asn}",
@@ -135,6 +135,8 @@ routes = [
     "/v1/dns/resolve/{target}",  "/v1/dns/enumerate/{domain}",
     "/v1/dns/dnssec/{domain}",   "/v1/dns/dnsbl/{ip}",
     "/v1/dns/email/{domain}",    "/v1/dns/propagation/{domain}",
+    "/v1/tls/{hostname}",        "/v1/ct/{domain}",
+    "/v1/threat/{ip}",           "/v1/pdns/{resource}",
 ]
 for r in routes:
     if r in api_src:
@@ -155,9 +157,9 @@ try:
     r = client.get("/")
     assert r.status_code == 200, f"Root returned {r.status_code}"
     data = r.json()
-    assert data["tools"] == 23, f"Root shows {data['tools']} tools not 23"
+    assert data["tools"] == 27, f"Root shows {data['tools']} tools not 27"
     assert data["name"] == "PeerGlass API", f"Name is {data['name']}"
-    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=23")
+    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=27")
 
     r = client.get("/v1/meta/cache")
     assert r.status_code == 200
@@ -189,12 +191,12 @@ except Exception as e:
 
 
 # ── 10. README ───────────────────────────────────────────────
-print("\n10. README — PeerGlass branding, 23 tools, RDAP note, historical-whois explained")
+print("\n10. README — PeerGlass branding, 27 tools, RDAP note, historical-whois explained")
 readme = open("README.md").read()
 
 must_contain = [
     ("PeerGlass",              "Product name present"),
-    ("23 tools",               "Correct tool count (23)"),
+    ("27 tools",               "Correct tool count (27)"),
     ("RDAP (RFC 7480",         "RDAP RFC reference"),
     ("Protocol note",          "WHOIS→RDAP explanation block"),
     ("peerglass",              "MCP config uses peerglass"),
@@ -419,6 +421,86 @@ for k in dns_ttl_keys:
         errors.append(f"sprint2:cache:{k}")
 
 
+# ── SECTION 13 — SPRINT 3 (TLS, CT Logs, Threat Intel, PDNS) ─
+print("\n13. SPRINT 3 — TLS (F1), CT Logs (F2), Threat Intel (G1), PDNS (E6)")
+
+# Client functions
+import rir_client as _rc3
+for fn_name in ["tls_inspect", "ct_logs", "threat_intel", "passive_dns"]:
+    if hasattr(_rc3, fn_name):
+        print(f"   ✅ Sprint 3: rir_client.{fn_name} present")
+    else:
+        print(f"   ❌ Sprint 3: rir_client.{fn_name} MISSING")
+        errors.append(f"sprint3:client:{fn_name}")
+
+# Models
+try:
+    from models import (
+        TLSInspectInput, TLSCertResult,
+        CTLogInput, CTLogEntry, CTLogResult,
+        ThreatIntelInput, ThreatIntelResult,
+        PassiveDNSInput, PassiveDNSRecord, PassiveDNSResult,
+    )
+    # Quick round-trip checks
+    tls = TLSCertResult(hostname="example.com", port=443)
+    assert tls.expired is True  # default True until connected
+    ct = CTLogResult(domain="example.com")
+    assert ct.total_found == 0
+    ti = ThreatIntelResult(ip="1.1.1.1")
+    assert ti.risk_level == "LOW"
+    pdns = PassiveDNSResult(resource="1.1.1.1")
+    assert pdns.total == 0
+    print("   ✅ Sprint 3: all models importable and round-trip correctly")
+except Exception as e:
+    print(f"   ❌ Sprint 3: model check failed: {e}")
+    errors.append(f"sprint3:models:{e}")
+
+# Formatters
+try:
+    from formatters import (
+        format_tls_inspect_md,
+        format_ct_logs_md,
+        format_threat_intel_md,
+        format_passive_dns_md,
+    )
+    print("   ✅ Sprint 3: all formatters importable")
+except Exception as e:
+    print(f"   ❌ Sprint 3: formatters import failed: {e}")
+    errors.append(f"sprint3:formatters:{e}")
+
+# MCP tools
+sprint3_mcp = [
+    "peerglass_tls_inspect", "peerglass_ct_logs",
+    "peerglass_threat_intel", "peerglass_passive_dns",
+]
+for tool in sprint3_mcp:
+    if tool in server_src:
+        print(f"   ✅ Sprint 3: MCP tool {tool} present")
+    else:
+        print(f"   ❌ Sprint 3: MCP tool {tool} MISSING")
+        errors.append(f"sprint3:mcp:{tool}")
+
+# REST routes
+api_src3 = open("api.py").read()
+sprint3_routes = ["/v1/tls/{hostname}", "/v1/ct/{domain}", "/v1/threat/{ip}", "/v1/pdns/{resource}"]
+for route in sprint3_routes:
+    if route in api_src3:
+        print(f"   ✅ Sprint 3: REST route {route} present")
+    else:
+        print(f"   ❌ Sprint 3: REST route {route} MISSING")
+        errors.append(f"sprint3:route:{route}")
+
+# Cache TTLs
+cache_src3 = open("cache.py").read()
+sprint3_ttls = ["TTL_TLS_INSPECT", "TTL_CT_LOGS", "TTL_THREAT_INTEL", "TTL_PASSIVE_DNS"]
+for k in sprint3_ttls:
+    if k in cache_src3:
+        print(f"   ✅ Sprint 3: cache.{k} present")
+    else:
+        print(f"   ❌ Sprint 3: cache.{k} MISSING")
+        errors.append(f"sprint3:cache:{k}")
+
+
 # ── SUMMARY ──────────────────────────────────────────────────
 print()
 print("=" * 60)
@@ -426,8 +508,8 @@ if not errors:
     print("✅ ALL TESTS PASSED — 0 errors")
     print()
     print("  Python files:         7  (all compile clean)")
-    print("  MCP tools:            23")
-    print("  REST endpoints:       21")
+    print("  MCP tools:            27")
+    print("  REST endpoints:       25")
     print("  Protocol:             RDAP throughout (RFC 7480-7484)")
     print("  Branding:             PeerGlass throughout")
     print("  historical-whois:     correctly attributed to RIPE Stat API naming")

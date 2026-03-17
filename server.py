@@ -48,6 +48,10 @@ from models import (
     DNSBLInput,
     EmailSecurityInput,
     DNSPropagationInput,
+    TLSInspectInput,
+    CTLogInput,
+    ThreatIntelInput,
+    PassiveDNSInput,
 )
 from normalizer import (
     normalize_ip_response,
@@ -76,6 +80,10 @@ from formatters import (
     format_dns_dnsbl_md,
     format_email_security_md,
     format_dns_propagation_md,
+    format_tls_inspect_md,
+    format_ct_logs_md,
+    format_threat_intel_md,
+    format_passive_dns_md,
     to_json,
 )
 
@@ -1442,6 +1450,180 @@ async def peerglass_dns_propagation(params: DNSPropagationInput) -> str:
     """
     result = await rir_client.dns_propagation(params)
     md  = format_dns_propagation_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 24 — TLS Inspection  [Phase 6 / Sprint 3 F1]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_tls_inspect",
+    annotations={
+        "title":           "TLS Certificate Inspection",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_tls_inspect(params: TLSInspectInput) -> str:
+    """
+    Connect to hostname:port over TLS and return full certificate details:
+    subject, issuer, Subject Alternative Names (SANs), expiry date, days
+    remaining, self-signed flag, TLS protocol version, cipher suite,
+    chain length, and HSTS header presence.
+
+    Useful for:
+    - Verifying certificate validity before expiry
+    - Detecting self-signed or untrusted certificates
+    - Checking TLS configuration (version, cipher suite)
+    - Auditing HSTS deployment
+
+    Args:
+        params (TLSInspectInput):
+            - hostname (str): Target hostname (e.g. 'cloudflare.com')
+            - port (int): TCP port — default 443
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Certificate details, expiry countdown, issuer chain, and HSTS status.
+    """
+    result = await rir_client.tls_inspect(params)
+    md  = format_tls_inspect_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 25 — Certificate Transparency Logs  [Phase 6 / Sprint 3 F2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_ct_logs",
+    annotations={
+        "title":           "Certificate Transparency Log Search",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_ct_logs(params: CTLogInput) -> str:
+    """
+    Search crt.sh for all TLS certificates ever issued for a domain via
+    Certificate Transparency logs. Returns deduplicated entries showing
+    common name, issuer CA, validity period, and SAN name_value.
+
+    Useful for:
+    - Discovering shadow IT / undocumented subdomains
+    - Auditing which CAs have been used for a domain
+    - Finding certificates issued before/after security incidents
+    - Verifying certificate rotation
+
+    Args:
+        params (CTLogInput):
+            - domain (str): Domain name (e.g. 'cloudflare.com')
+            - limit (int): Max entries to return (default 50, max 500)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Certificate log table with CN, CA, validity dates, and unique CA summary.
+    """
+    result = await rir_client.ct_logs(params)
+    md  = format_ct_logs_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 26 — Threat Intelligence  [Phase 6 / Sprint 3 G1]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_threat_intel",
+    annotations={
+        "title":           "Threat Intelligence (Shodan + GreyNoise)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_threat_intel(params: ThreatIntelInput) -> str:
+    """
+    Passive threat intelligence for an IP address from two sources:
+
+    1. Shodan InternetDB (always available, no API key required):
+       - Open ports detected via internet scanning
+       - CVE identifiers for detected services
+       - Reverse DNS hostnames
+       - Shodan tags (cdn, vpn, tor-exit, etc.)
+
+    2. GreyNoise Community (requires GREYNOISE_API_KEY env var):
+       - Classification: malicious / benign / unknown
+       - RIOT flag: trusted service (Google, Amazon, etc.)
+       - Noise flag: benign internet background scanner
+       - Named actor or service attribution
+
+    Produces an aggregated risk score (0–100) and level (LOW / MEDIUM / HIGH / CRITICAL).
+
+    Args:
+        params (ThreatIntelInput):
+            - ip (str): IPv4 address (e.g. '1.2.3.4')
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Open ports, CVEs, GreyNoise classification, and risk assessment.
+    """
+    result = await rir_client.threat_intel(params)
+    md  = format_threat_intel_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 27 — Passive DNS  [Phase 6 / Sprint 3 E6]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_passive_dns",
+    annotations={
+        "title":           "Passive DNS History (RIPE Stat)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_passive_dns(params: PassiveDNSInput) -> str:
+    """
+    Query RIPE Stat Passive DNS for historical DNS records associated with
+    an IP address or domain name. Shows what hostnames pointed to an IP
+    (or what IPs a hostname resolved to) over time, with first/last seen
+    timestamps and observation counts.
+
+    Useful for:
+    - Tracing infrastructure changes over time
+    - Finding previously-used domains for an IP
+    - Investigating historical malware C2 infrastructure
+    - Attribution and threat hunting
+
+    Data source: RIPE NCC's Passive DNS system, which aggregates DNS
+    queries from recursive resolvers across the network.
+
+    Args:
+        params (PassiveDNSInput):
+            - resource (str): IP address or domain name
+            - limit (int): Max records (default 100, max 500)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Historical DNS records table with rrtype, value, and first/last seen dates.
+    """
+    result = await rir_client.passive_dns(params)
+    md  = format_passive_dns_md(result)
     jsn = to_json(result)
     return jsn if params.response_format == ResponseFormat.JSON else md
 

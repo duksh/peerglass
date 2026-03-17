@@ -2525,3 +2525,333 @@ async def dns_propagation(domain: str, record_type: str = "A") -> DNSPropagation
         entries=entries,
         errors=errors,
     )
+
+
+# ============================================================
+# Sprint 3 — TLS Inspection (F1), CT Logs (F2),
+#            Threat Intel (G1), Passive DNS (E6)
+# ============================================================
+
+import ssl as _ssl
+import re as _re
+from datetime import datetime, timezone as _tz
+
+from models import (
+    TLSInspectInput, TLSCertResult,
+    CTLogInput, CTLogEntry, CTLogResult,
+    ThreatIntelInput, ThreatIntelResult,
+    PassiveDNSInput, PassiveDNSRecord, PassiveDNSResult,
+)
+
+
+# ── F1: TLS Certificate Inspection ──────────────────────────
+
+def _parse_rdns(rdns_tuple: tuple) -> dict:
+    """Convert SSL cert RDN tuple → plain dict."""
+    out = {}
+    for pair in rdns_tuple:
+        if isinstance(pair, (list, tuple)) and len(pair) == 1:
+            k, v = pair[0]
+            out[k] = v
+        elif isinstance(pair, (list, tuple)) and len(pair) == 2:
+            k, v = pair
+            out[k] = v
+    return out
+
+
+async def tls_inspect(inp: TLSInspectInput) -> TLSCertResult:
+    """F1 — Connect to hostname:port via TLS, extract cert + cipher + HSTS."""
+    error = None
+    cert_raw: dict = {}
+    cipher_suite: str | None = None
+    protocol_version: str | None = None
+    chain_length: int = 0
+
+    try:
+        ctx = _ssl.create_default_context()
+        reader, writer = await asyncio.open_connection(
+            inp.hostname, inp.port,
+            ssl=ctx,
+            server_hostname=inp.hostname,
+        )
+        ssl_obj = writer.get_extra_info("ssl_object")
+        cert_raw = ssl_obj.getpeercert() or {}
+        cipher = ssl_obj.cipher()
+        if cipher:
+            cipher_suite = cipher[0]
+            protocol_version = cipher[1]
+        # Python 3.10+ chain access
+        try:
+            chain_length = len(ssl_obj.get_verified_chain())
+        except AttributeError:
+            chain_length = 1
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+    except Exception as exc:
+        error = str(exc)
+
+    # Parse subject / issuer
+    subject = _parse_rdns(cert_raw.get("subject", ()))
+    issuer  = _parse_rdns(cert_raw.get("issuer",  ()))
+
+    # SAN
+    san: list[str] = [v for t, v in cert_raw.get("subjectAltName", []) if t == "DNS"]
+
+    # Expiry
+    not_before_str = cert_raw.get("notBefore", "")
+    not_after_str  = cert_raw.get("notAfter",  "")
+    days_until_expiry = -1
+    expired = error is not None  # if connection failed, cert is not valid
+    try:
+        # Format: "Jan 15 00:00:00 2025 GMT"
+        not_after_dt = datetime.strptime(not_after_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=_tz.utc)
+        now = datetime.now(_tz.utc)
+        delta = not_after_dt - now
+        days_until_expiry = delta.days
+        expired = delta.total_seconds() < 0
+    except Exception:
+        pass
+
+    self_signed = bool(subject and issuer and subject == issuer)
+
+    # HSTS — separate HTTP request
+    hsts = False
+    hsts_max_age: int | None = None
+    try:
+        async with httpx.AsyncClient(timeout=5, verify=False, follow_redirects=True) as client:
+            r = await client.get(
+                f"https://{inp.hostname}:{inp.port}/",
+                headers={"User-Agent": _USER_AGENT},
+            )
+            sts_header = r.headers.get("strict-transport-security", "")
+            if sts_header:
+                hsts = True
+                m = _re.search(r"max-age=(\d+)", sts_header)
+                if m:
+                    hsts_max_age = int(m.group(1))
+    except Exception:
+        pass  # HSTS check is best-effort
+
+    return TLSCertResult(
+        hostname=inp.hostname,
+        port=inp.port,
+        subject=subject,
+        issuer=issuer,
+        san=san,
+        not_before=not_before_str,
+        not_after=not_after_str,
+        days_until_expiry=days_until_expiry,
+        expired=expired,
+        self_signed=self_signed,
+        cipher_suite=cipher_suite,
+        protocol_version=protocol_version,
+        chain_length=chain_length,
+        hsts=hsts,
+        hsts_max_age=hsts_max_age,
+        error=error,
+    )
+
+
+# ── F2: Certificate Transparency Logs ───────────────────────
+
+def _extract_cn(name_str: str) -> str:
+    """Pull CN value from an X.509 name string like 'C=US, O=Foo, CN=Bar'."""
+    m = _re.search(r"CN=([^,]+)", name_str)
+    return m.group(1).strip() if m else name_str.strip()
+
+
+async def ct_logs(inp: CTLogInput) -> CTLogResult:
+    """F2 — Query crt.sh for Certificate Transparency records for a domain."""
+    url = f"https://crt.sh/?q={inp.domain}&output=json"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers={"User-Agent": _USER_AGENT})
+            if r.status_code != 200:
+                return CTLogResult(
+                    domain=inp.domain,
+                    error=f"crt.sh returned HTTP {r.status_code}",
+                )
+            raw: list = r.json()
+    except Exception as exc:
+        return CTLogResult(domain=inp.domain, error=str(exc))
+
+    total_found = len(raw)
+    # Deduplicate by cert ID, newest first
+    seen_ids: set[int] = set()
+    entries: list[CTLogEntry] = []
+    for item in raw:
+        cid = int(item.get("id", 0))
+        if cid in seen_ids:
+            continue
+        seen_ids.add(cid)
+        entries.append(CTLogEntry(
+            id=cid,
+            issuer_cn=_extract_cn(item.get("issuer_name", "")),
+            common_name=item.get("common_name", ""),
+            name_value=item.get("name_value", ""),
+            not_before=str(item.get("not_before", "")),
+            not_after=str(item.get("not_after", "")),
+            entry_timestamp=str(item.get("entry_timestamp")) if item.get("entry_timestamp") else None,
+        ))
+        if len(entries) >= inp.limit:
+            break
+
+    unique_issuers = sorted(set(e.issuer_cn for e in entries if e.issuer_cn))
+
+    return CTLogResult(
+        domain=inp.domain,
+        total_found=total_found,
+        returned=len(entries),
+        entries=entries,
+        unique_issuers=unique_issuers,
+    )
+
+
+# ── G1: Threat Intelligence ──────────────────────────────────
+
+_GREYNOISE_COMMUNITY_URL = "https://api.greynoise.io/v3/community/{ip}"
+_SHODAN_INTERNETDB_URL   = "https://internetdb.shodan.io/{ip}"
+
+
+async def threat_intel(inp: ThreatIntelInput) -> ThreatIntelResult:
+    """G1 — Shodan InternetDB (free) + optional GreyNoise Community enrichment."""
+    import os as _os
+
+    shodan_url = _SHODAN_INTERNETDB_URL.format(ip=inp.ip)
+    gn_url     = _GREYNOISE_COMMUNITY_URL.format(ip=inp.ip)
+    gn_api_key = _os.getenv("GREYNOISE_API_KEY", "")
+
+    shodan_data: dict = {}
+    gn_data:     dict = {}
+    shodan_error: str | None = None
+    gn_error:     str | None = None
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        # Always query Shodan InternetDB (free, no key)
+        try:
+            r = await client.get(shodan_url, headers={"User-Agent": _USER_AGENT})
+            if r.status_code == 200:
+                shodan_data = r.json()
+            elif r.status_code == 404:
+                shodan_data = {}  # IP not in Shodan — clean
+            else:
+                shodan_error = f"Shodan returned HTTP {r.status_code}"
+        except Exception as exc:
+            shodan_error = str(exc)
+
+        # GreyNoise — only if API key is configured
+        if gn_api_key:
+            try:
+                r = await client.get(
+                    gn_url,
+                    headers={"User-Agent": _USER_AGENT, "key": gn_api_key},
+                )
+                if r.status_code == 200:
+                    gn_data = r.json()
+                elif r.status_code == 404:
+                    gn_data = {"noise": False, "riot": False, "classification": "unknown"}
+                else:
+                    gn_error = f"GreyNoise returned HTTP {r.status_code}"
+            except Exception as exc:
+                gn_error = str(exc)
+        else:
+            gn_error = "No GREYNOISE_API_KEY set — skipped"
+
+    open_ports     = shodan_data.get("ports", [])
+    vulnerabilities = shodan_data.get("vulns", [])
+    hostnames       = shodan_data.get("hostnames", [])
+    tags            = shodan_data.get("tags", [])
+
+    noise          = gn_data.get("noise")
+    riot           = gn_data.get("riot")
+    classification = gn_data.get("classification")
+    gn_name        = gn_data.get("name")
+    gn_link        = gn_data.get("link")
+
+    # Risk scoring (0–100)
+    score = 0
+    if vulnerabilities:
+        score += min(len(vulnerabilities) * 10, 40)
+    if classification == "malicious":
+        score += 40
+    elif riot or classification == "benign":
+        score = max(score - 10, 0)
+    if len(open_ports) > 30:
+        score += 10
+    score = min(score, 100)
+
+    if score >= 70:
+        risk_level = "CRITICAL"
+    elif score >= 40:
+        risk_level = "HIGH"
+    elif score >= 20:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+
+    return ThreatIntelResult(
+        ip=inp.ip,
+        open_ports=open_ports,
+        vulnerabilities=vulnerabilities,
+        hostnames=hostnames,
+        tags=tags,
+        noise=noise,
+        riot=riot,
+        classification=classification,
+        greynoise_name=gn_name,
+        greynoise_link=gn_link,
+        greynoise_error=gn_error,
+        risk_score=score,
+        risk_level=risk_level,
+        shodan_error=shodan_error,
+    )
+
+
+# ── E6: Passive DNS ─────────────────────────────────────────
+
+_RIPE_PDNS_URL = "https://stat.ripe.net/data/pdns/data.json"
+
+
+async def passive_dns(inp: PassiveDNSInput) -> PassiveDNSResult:
+    """E6 — RIPE Stat Passive DNS history for an IP or domain."""
+    params = {"resource": inp.resource, "limit": inp.limit}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(
+                _RIPE_PDNS_URL,
+                params=params,
+                headers={"User-Agent": _USER_AGENT},
+            )
+            if r.status_code != 200:
+                return PassiveDNSResult(
+                    resource=inp.resource,
+                    error=f"RIPE Stat returned HTTP {r.status_code}",
+                )
+            payload = r.json()
+    except Exception as exc:
+        return PassiveDNSResult(resource=inp.resource, error=str(exc))
+
+    data_block = payload.get("data", {})
+    records_raw = data_block.get("records", [])
+
+    records: list[PassiveDNSRecord] = []
+    for rec in records_raw:
+        # RIPE PDNS record: {rrtype, rdata, time_first, time_last, count}
+        records.append(PassiveDNSRecord(
+            rrtype=rec.get("rrtype", ""),
+            rdata=rec.get("rdata", ""),
+            time_first=rec.get("time_first", ""),
+            time_last=rec.get("time_last", ""),
+            count=int(rec.get("count", 0)),
+        ))
+
+    return PassiveDNSResult(
+        resource=inp.resource,
+        total=len(records),
+        records=records,
+        query_starttime=data_block.get("query_starttime"),
+        query_endtime=data_block.get("query_endtime"),
+    )

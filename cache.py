@@ -47,6 +47,12 @@ TTL_DNS_DNSBL      = 3_600     # 1 hour     — blocklist status is semi-static
 TTL_DNS_EMAIL      = 3_600     # 1 hour     — SPF/DMARC/DKIM change rarely
 TTL_DNS_PROPAGATION = 120      # 2 minutes  — propagation is time-sensitive
 
+# Sprint 3 — TLS, CT logs, Threat Intel, Passive DNS
+TTL_TLS_INSPECT  = 3_600     # 1 hour     — certs change infrequently
+TTL_CT_LOGS      = 86_400    # 24 hours   — CT log history is append-only
+TTL_THREAT_INTEL = 3_600     # 1 hour     — Shodan/GreyNoise refreshes hourly
+TTL_PASSIVE_DNS  = 86_400    # 24 hours   — PDNS history rarely changes
+
 # ── In-memory store ─────────────────────────────────────────
 _STORE: dict[str, tuple[Any, float]] = {}
 
@@ -146,6 +152,18 @@ def make_dns_email_key(domain: str) -> str:
 
 def make_dns_propagation_key(domain: str, record_type: str) -> str:
     return _make_key("dns_propagation", domain.lower().strip(), record_type.upper())
+
+def make_tls_key(hostname: str, port: int) -> str:
+    return _make_key("tls", hostname.lower().strip(), int(port))
+
+def make_ct_key(domain: str) -> str:
+    return _make_key("ct_logs", domain.lower().strip())
+
+def make_threat_intel_key(ip: str) -> str:
+    return _make_key("threat_intel", ip.strip())
+
+def make_passive_dns_key(resource: str) -> str:
+    return _make_key("passive_dns", resource.lower().strip())
 
 
 # ── Monitor Store — persistent baselines for change detection ──

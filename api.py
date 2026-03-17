@@ -74,6 +74,10 @@ from formatters import (
     format_dns_dnsbl_md,
     format_email_security_md,
     format_dns_propagation_md,
+    format_tls_inspect_md,
+    format_ct_logs_md,
+    format_threat_intel_md,
+    format_passive_dns_md,
     to_json,
 )
 from normalizer import normalize_ip_response, normalize_asn_response
@@ -82,6 +86,7 @@ from models import (
     ResponseFormat,
     DNSResolveInput, DNSEnumerateInput, DNSSECInput,
     DNSBLInput, EmailSecurityInput, DNSPropagationInput,
+    TLSInspectInput, CTLogInput, ThreatIntelInput, PassiveDNSInput,
 )
 
 # ──────────────────────────────────────────────────────────────
@@ -164,7 +169,7 @@ async def root():
         "description": "Internet resource intelligence: RIR + BGP + RPKI + PeeringDB",
         "docs": "/docs",
         "redoc": "/redoc",
-        "tools": 23,
+        "tools": 27,
         "endpoints": {
             "ip":              "/v1/ip/{ip}",
             "asn":             "/v1/asn/{asn}",
@@ -187,6 +192,10 @@ async def root():
             "dns_dnsbl":       "/v1/dns/dnsbl/{ip}",
             "dns_email":       "/v1/dns/email/{domain}",
             "dns_propagation": "/v1/dns/propagation/{domain}",
+            "tls":             "/v1/tls/{hostname}",
+            "ct_logs":         "/v1/ct/{domain}",
+            "threat_intel":    "/v1/threat/{ip}",
+            "passive_dns":     "/v1/pdns/{resource}",
             "cache_stats":     "/v1/meta/cache",
             "server_status":   "/v1/meta/status",
         },
@@ -938,6 +947,133 @@ async def dns_propagation(
 
 
 # ──────────────────────────────────────────────────────────────
+# Sprint 3 endpoints — TLS (F1), CT Logs (F2), Threat Intel (G1), PDNS (E6)
+# ──────────────────────────────────────────────────────────────
+
+@app.get(
+    "/v1/tls/{hostname}",
+    tags=["TLS"],
+    summary="TLS certificate inspection — chain, expiry, cipher, HSTS",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def tls_inspect(
+    request: Request,
+    hostname: str,
+    port: int = Query(default=443, ge=1, le=65535, description="TCP port (default 443)"),
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Connect to `hostname:port` over TLS and return the leaf certificate details:
+    subject, issuer, SANs, expiry, days remaining, self-signed flag, cipher suite,
+    TLS version, chain length, and HSTS header presence.
+
+    **Examples:** `cloudflare.com`, `expired.badssl.com`
+    """
+    cache_key = cache_module.make_tls_key(hostname, port)
+    cached = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    inp = TLSInspectInput(hostname=hostname, port=port)
+    result = await rir_client.tls_inspect(inp)
+    md  = format_tls_inspect_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_TLS_INSPECT)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/ct/{domain}",
+    tags=["TLS"],
+    summary="Certificate Transparency log search (crt.sh)",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def ct_logs(
+    request: Request,
+    domain: str,
+    limit: int = Query(default=50, ge=1, le=500, description="Max entries to return"),
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Search crt.sh for all certificates ever issued for a domain (including
+    subdomains). Useful for discovering shadow IT, verifying CA coverage,
+    or auditing certificate issuance history.
+
+    **Example:** `cloudflare.com`
+    """
+    cache_key = cache_module.make_ct_key(domain)
+    cached = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    inp = CTLogInput(domain=domain, limit=limit)
+    result = await rir_client.ct_logs(inp)
+    md  = format_ct_logs_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_CT_LOGS)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/threat/{ip}",
+    tags=["Threat Intelligence"],
+    summary="Threat intel — Shodan InternetDB + optional GreyNoise",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def threat_intel(
+    request: Request,
+    ip: str,
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Query Shodan InternetDB (free, no key) for open ports, CVEs, hostnames,
+    and tags. Optionally enriches with GreyNoise Community classification
+    (malicious / benign / RIOT) when `GREYNOISE_API_KEY` env var is set.
+
+    **Example:** `8.8.8.8`
+    """
+    cache_key = cache_module.make_threat_intel_key(ip)
+    cached = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    inp = ThreatIntelInput(ip=ip)
+    result = await rir_client.threat_intel(inp)
+    md  = format_threat_intel_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_THREAT_INTEL)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/pdns/{resource}",
+    tags=["DNS"],
+    summary="Passive DNS history (RIPE Stat)",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def passive_dns(
+    request: Request,
+    resource: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Query RIPE Stat Passive DNS for historical DNS records for an IP address
+    or domain. Shows what names have resolved to/from this resource over time,
+    with first/last seen timestamps and observation counts.
+
+    **Examples:** `8.8.8.8`, `cloudflare.com`
+    """
+    cache_key = cache_module.make_passive_dns_key(resource)
+    cached = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    inp = PassiveDNSInput(resource=resource, limit=limit)
+    result = await rir_client.passive_dns(inp)
+    md  = format_passive_dns_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_PASSIVE_DNS)
+    return _resp(md, jsn, format)
+
+
+# ──────────────────────────────────────────────────────────────
 # OpenAI / Gemini function-calling schema endpoint
 # ──────────────────────────────────────────────────────────────
 
@@ -1161,6 +1297,65 @@ async def openai_tools(request: Request):
                         "record_type": {"type": "string", "description": "DNS record type (default A)"},
                     },
                     "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_tls_inspect",
+                "description": "TLS certificate inspection: subject, issuer, SANs, expiry, cipher suite, HSTS.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "hostname": {"type": "string", "description": "Hostname to connect to"},
+                        "port": {"type": "integer", "description": "TCP port (default 443)"},
+                    },
+                    "required": ["hostname"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_ct_logs",
+                "description": "Certificate Transparency log search via crt.sh — find all certificates ever issued for a domain.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "domain": {"type": "string", "description": "Domain name"},
+                        "limit": {"type": "integer", "description": "Max results (default 50, max 500)"},
+                    },
+                    "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_threat_intel",
+                "description": "Threat intelligence: Shodan open ports/CVEs/hostnames (free) + GreyNoise classification (optional API key).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ip": {"type": "string", "description": "IPv4 address"}
+                    },
+                    "required": ["ip"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_passive_dns",
+                "description": "Passive DNS history from RIPE Stat — what domains/IPs has this resource resolved to/from historically.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "resource": {"type": "string", "description": "IP address or domain name"},
+                        "limit": {"type": "integer", "description": "Max records (default 100)"},
+                    },
+                    "required": ["resource"],
                 },
             },
         },
