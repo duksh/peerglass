@@ -374,7 +374,7 @@ You should run both — they catch different categories of problems.
 | 4 | Protocol header | `Accept: application/rdap+json` is set |
 | 5 | User-Agent | Updated to `peerglass/1.0.0` |
 | 6 | MCP server name | `"peerglass"` |
-| 7 | Tool count | Exactly 17 `@mcp.tool()` decorators in `server.py` |
+| 7 | Tool count | Exactly 27 `@mcp.tool()` decorators in `server.py` |
 | 8 | REST endpoints | All 25 routes present in `api.py` |
 | 9 | FastAPI runtime | TestClient hits 3 endpoints in-memory, validates responses |
 | 10 | README | PeerGlass branding, 27 tools, RDAP note all present |
