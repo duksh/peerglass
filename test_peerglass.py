@@ -176,7 +176,7 @@ try:
 
     r = client.get("/v1/meta/openai-tools")
     assert r.status_code == 200
-    tools_json = r.json()["tools"]
+    tools_json = r.json()  # bare array since d08db0b
     names = [t["function"]["name"] for t in tools_json]
     required = [
         "peerglass_health", "peerglass_rpki",
