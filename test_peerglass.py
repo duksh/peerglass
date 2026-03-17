@@ -109,14 +109,14 @@ else:
 
 
 # ── 7. TOOL COUNT ────────────────────────────────────────────
-print("\n7. TOOL COUNT — 31 @mcp.tool() decorators in server.py")
+print("\n7. TOOL COUNT — 39 @mcp.tool() decorators in server.py")
 # Decorator is @mcp.tool( with description kwarg on next line
 tools_found = re.findall(r"@mcp\.tool\(", server_src)
 count = len(tools_found)
-if count == 31:
+if count == 39:
     print(f"   ✅ {count} @mcp.tool() decorators found")
 else:
-    print(f"   ❌ Expected 31, found {count}")
+    print(f"   ❌ Expected 39, found {count}")
     errors.append(f"tool_count:{count}")
 
 
@@ -139,6 +139,10 @@ routes = [
     "/v1/threat/{ip}",           "/v1/pdns/{resource}",
     "/v1/irr",                   "/v1/route-leak/",
     "/v1/looking-glass/",        "/v1/stability/",
+    "/v1/shutdown/",             "/v1/shutdown/monitor",
+    "/v1/shutdown/timeline/",    "/v1/censorship/",
+    "/v1/satellite/",            "/v1/chokepoints/",
+    "/v1/ooni/",                 "/v1/health/country/",
 ]
 for r in routes:
     if r in api_src:
@@ -159,9 +163,9 @@ try:
     r = client.get("/")
     assert r.status_code == 200, f"Root returned {r.status_code}"
     data = r.json()
-    assert data["tools"] == 31, f"Root shows {data['tools']} tools not 31"
+    assert data["tools"] == 39, f"Root shows {data['tools']} tools not 31"
     assert data["name"] == "PeerGlass API", f"Name is {data['name']}"
-    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=31")
+    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=39")
 
     r = client.get("/v1/meta/cache")
     assert r.status_code == 200
@@ -193,12 +197,12 @@ except Exception as e:
 
 
 # ── 10. README ───────────────────────────────────────────────
-print("\n10. README — PeerGlass branding, 27 tools, RDAP note, historical-whois explained")
+print("\n10. README — PeerGlass branding, 39 tools, RDAP note, historical-whois explained")
 readme = open("README.md").read()
 
 must_contain = [
     ("PeerGlass",              "Product name present"),
-    ("31 tools",               "Correct tool count (31)"),
+    ("39 tools",               "Correct tool count (39)"),
     ("RDAP (RFC 7480",         "RDAP RFC reference"),
     ("Protocol note",          "WHOIS→RDAP explanation block"),
     ("peerglass",              "MCP config uses peerglass"),
@@ -585,6 +589,99 @@ for k in sprint4_ttls:
         errors.append(f"sprint4:cache:{k}")
 
 
+# ── SPRINT 5 — Humanitarian / Crisis (H1–H8) ─────────────────
+print()
+print("15. SPRINT 5 — Shutdown (H1), Webhooks (H2), Timeline (H3), Censorship (H4),")
+print("               Satellite (H5), Chokepoints (H6), OONI (H7), Country Health (H8)")
+
+client_src5 = open("rir_client.py").read()
+sprint5_fns = [
+    "detect_shutdown", "register_shutdown_monitor", "get_shutdown_timeline",
+    "probe_dns_censorship", "get_satellite_connectivity",
+    "get_country_chokepoints", "get_ooni_report", "get_country_health",
+]
+for fn in sprint5_fns:
+    if f"async def {fn}" in client_src5:
+        print(f"   ✅ Sprint 5: rir_client.{fn} present")
+    else:
+        print(f"   ❌ Sprint 5: rir_client.{fn} MISSING")
+        errors.append(f"sprint5:fn:{fn}")
+
+from models import (
+    ShutdownDetectInput, ShutdownDetectResult,
+    MonitorRegisterInput, MonitorRegisterResult,
+    ShutdownTimelineInput, ShutdownTimelineResult,
+    CensorshipProbeInput, CensorshipProbeResult,
+    SatelliteConnectivityInput, SatelliteConnectivityResult,
+    ChokePointInput, ChokePointResult,
+    OONIReportInput, OONIReportResult,
+    CountryHealthInput, CountryHealthResult,
+)
+sprint5_models = [
+    "ShutdownDetectInput", "ShutdownDetectResult",
+    "MonitorRegisterInput", "MonitorRegisterResult",
+    "ShutdownTimelineInput", "ShutdownTimelineResult",
+    "CensorshipProbeInput", "CensorshipProbeResult",
+    "SatelliteConnectivityInput", "SatelliteConnectivityResult",
+    "ChokePointInput", "ChokePointResult",
+    "OONIReportInput", "OONIReportResult",
+    "CountryHealthInput", "CountryHealthResult",
+]
+for name in sprint5_models:
+    print(f"   ✅ Sprint 5: model {name} importable")
+
+from formatters import (
+    format_shutdown_detect_md, format_monitor_register_md,
+    format_shutdown_timeline_md, format_censorship_probe_md,
+    format_satellite_connectivity_md, format_chokepoints_md,
+    format_ooni_report_md, format_country_health_md,
+)
+for fn_name in ["format_shutdown_detect_md", "format_monitor_register_md",
+                "format_shutdown_timeline_md", "format_censorship_probe_md",
+                "format_satellite_connectivity_md", "format_chokepoints_md",
+                "format_ooni_report_md", "format_country_health_md"]:
+    print(f"   ✅ Sprint 5: formatter {fn_name} importable")
+
+server_src5 = open("server.py").read()
+sprint5_tools = [
+    "peerglass_shutdown_detect", "peerglass_monitor_register",
+    "peerglass_shutdown_timeline", "peerglass_dns_censorship",
+    "peerglass_satellite_connectivity", "peerglass_country_chokepoints",
+    "peerglass_ooni_report", "peerglass_country_health",
+]
+for tool in sprint5_tools:
+    if f'name="{tool}"' in server_src5:
+        print(f"   ✅ Sprint 5: MCP tool {tool} present")
+    else:
+        print(f"   ❌ Sprint 5: MCP tool {tool} MISSING")
+        errors.append(f"sprint5:mcp:{tool}")
+
+api_src5 = open("api.py").read()
+sprint5_routes = [
+    "/v1/shutdown/", "/v1/shutdown/monitor", "/v1/shutdown/timeline/",
+    "/v1/censorship/", "/v1/satellite/", "/v1/chokepoints/",
+    "/v1/ooni/", "/v1/health/country/",
+]
+for route in sprint5_routes:
+    if route in api_src5:
+        print(f"   ✅ Sprint 5: REST route {route} present")
+    else:
+        print(f"   ❌ Sprint 5: REST route {route} MISSING")
+        errors.append(f"sprint5:route:{route}")
+
+cache_src5 = open("cache.py").read()
+sprint5_ttls = [
+    "TTL_SHUTDOWN", "TTL_SHUTDOWN_TIMELINE", "TTL_CENSORSHIP",
+    "TTL_SATELLITE", "TTL_CHOKEPOINTS", "TTL_OONI", "TTL_COUNTRY_HEALTH",
+]
+for k in sprint5_ttls:
+    if k in cache_src5:
+        print(f"   ✅ Sprint 5: cache.{k} present")
+    else:
+        print(f"   ❌ Sprint 5: cache.{k} MISSING")
+        errors.append(f"sprint5:cache:{k}")
+
+
 # ── SUMMARY ──────────────────────────────────────────────────
 print()
 print("=" * 60)
@@ -592,8 +689,8 @@ if not errors:
     print("✅ ALL TESTS PASSED — 0 errors")
     print()
     print("  Python files:         7  (all compile clean)")
-    print("  MCP tools:            31")
-    print("  REST endpoints:       29")
+    print("  MCP tools:            39")
+    print("  REST endpoints:       37")
     print("  Protocol:             RDAP throughout (RFC 7480-7484)")
     print("  Branding:             PeerGlass throughout")
     print("  historical-whois:     correctly attributed to RIPE Stat API naming")

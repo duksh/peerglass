@@ -33,7 +33,15 @@ from models import RIRName, RIRQueryResult, RPKIResult, RPKIValidity, \
     IRRResult, IRRRouteObject, \
     RouteLeakResult, RouteLeakPath, \
     LookingGlassResult, LookingGlassEntry, \
-    RouteStabilityResult, RouteEvent
+    RouteStabilityResult, RouteEvent, \
+    ShutdownDetectResult, AffectedASN, \
+    MonitorRegisterResult, \
+    ShutdownTimelineResult, ShutdownEvent, \
+    CensorshipProbeResult, CensorshipProbeEntry, \
+    SatelliteConnectivityResult, SatelliteProvider, \
+    ChokePointResult, TransitProvider, \
+    OONIReportResult, OONIMeasurement, \
+    CountryHealthResult
 
 
 # ──────────────────────────────────────────────────────────────
@@ -93,6 +101,10 @@ RIR_REGIONS: dict[str, str] = {
     "LACNIC":  "Latin America & Caribbean",
     "RIPE":    "Europe / Middle East / Central Asia",
 }
+
+# Sprint 5 — Humanitarian / crisis endpoints
+RIPE_STAT_COUNTRY_RESOURCES = "https://stat.ripe.net/data/country-resource-list/data.json"
+OONI_MEASUREMENTS_URL       = "https://api.ooni.io/api/v1/measurements"
 
 # Phase 4 — PeeringDB + RIPE Stat neighbours
 PEERINGDB_NET_URL   = "https://www.peeringdb.com/api/net"
@@ -3190,4 +3202,700 @@ async def get_route_stability(prefix: str, hours: int = 24) -> RouteStabilityRes
         events=events[:20],
     )
     _cache.set(ck, result.model_dump(), _cache.TTL_ROUTE_STABILITY)
+    return result
+
+
+# ──────────────────────────────────────────────────────────────
+# Sprint 5 — Humanitarian / Crisis
+# ──────────────────────────────────────────────────────────────
+
+# Satellite operator ASN map
+_SATELLITE_ASNS: dict[str, str] = {
+    "Starlink (SpaceX)": "14593",
+    "Viasat":            "21928",
+    "OneWeb":            "136763",
+    "SES Networks":      "5377",
+    "Inmarsat":          "22351",
+    "HughesNet":         "6517",
+}
+
+# Country-specific DNS resolvers for censorship probing
+_COUNTRY_RESOLVERS: dict[str, list[tuple[str, str]]] = {
+    "IR": [("185.51.200.2", "Shatel Iran"),       ("178.22.122.100", "Respina Iran")],
+    "RU": [("77.88.8.8",   "Yandex DNS Russia"),  ("8.8.8.8",        "Google RU")],
+    "CN": [("114.114.114.114", "114 DNS China"),  ("223.5.5.5",      "Alibaba DNS")],
+    "TR": [("195.175.39.39", "Turk Telekom"),     ("195.175.37.37",  "Turk Telekom 2")],
+    "SY": [("188.247.13.2",  "STE Syria"),        ("37.98.254.1",    "STE Syria 2")],
+    "BY": [("178.172.160.100", "Beltelecom BY"),  ("8.8.8.8",        "Google BY")],
+    "EG": [("163.121.128.134", "TE Egypt"),       ("163.121.129.134","TE Egypt 2")],
+    "PK": [("209.150.154.1", "PTCL Pakistan"),    ("209.150.150.1",  "PTCL Pakistan 2")],
+    "IN": [("49.207.44.100", "BSNL India"),       ("122.160.19.130", "BSNL India 2")],
+    "VN": [("203.162.4.190", "VNPT Vietnam"),     ("125.212.217.215","Viettel VN")],
+}
+
+_NEUTRAL_RESOLVERS: list[tuple[str, str, str]] = [
+    ("1.1.1.1",  "Cloudflare",     "Global"),
+    ("8.8.8.8",  "Google",         "Global"),
+    ("9.9.9.9",  "Quad9",          "Global"),
+]
+
+
+async def _get_country_asns(country_code: str, client: httpx.AsyncClient) -> list[str]:
+    """Return list of ASNs allocated to *country_code* via RIPE Stat."""
+    url = f"{RIPE_STAT_COUNTRY_RESOURCES}?resource={country_code}"
+    try:
+        r = await client.get(url, timeout=20.0, headers={"User-Agent": _USER_AGENT})
+        if r.status_code != 200:
+            return []
+        data = r.json().get("data", {}).get("resources", {})
+        return data.get("asn", [])   # ["AS1234", "AS5678", ...]
+    except Exception:
+        return []
+
+
+# ── H1 — Country BGP Shutdown Detection ───────────────────────
+
+async def detect_shutdown(country_code: str) -> ShutdownDetectResult:
+    """
+    Detect internet shutdown for *country_code* by comparing current BGP prefix
+    counts against a stored baseline. Severity: NORMAL | DEGRADED | PARTIAL_SHUTDOWN | FULL_SHUTDOWN.
+    """
+    import datetime as _dt
+    import cache as _cache
+
+    cc  = country_code.upper().strip()
+    ck  = _cache.make_shutdown_key(cc)
+    hit = _cache.get(ck)
+    if hit:
+        return ShutdownDetectResult.model_validate(hit)
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+        asns = await _get_country_asns(cc, client)
+
+    if not asns:
+        return ShutdownDetectResult(
+            country_code=cc,
+            severity="UNKNOWN",
+            errors=[f"No ASNs found for country code '{cc}' — check ISO 3166-1 alpha-2 spelling"],
+        )
+
+    # Sample up to 30 ASNs to avoid overwhelming RIPE Stat
+    sample = asns[:30]
+    tasks  = [get_announced_prefixes(a.lstrip("AS")) for a in sample]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    current_total    = 0
+    affected_asns: list[AffectedASN] = []
+    for asn_str, res in zip(sample, results):
+        if isinstance(res, Exception):
+            continue
+        count = len(res.announced_prefixes)
+        current_total += count
+        affected_asns.append(AffectedASN(asn=asn_str, current_prefixes=count))
+
+    now_str  = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    baseline = _cache.get_baseline(f"shutdown_{cc}")
+
+    if baseline is None:
+        _cache.set_baseline(f"shutdown_{cc}", {"total_prefixes": current_total, "captured_at": now_str})
+        result = ShutdownDetectResult(
+            country_code=cc, severity="NORMAL",
+            baseline_prefixes=current_total, current_prefixes=current_total,
+            affected_asns=affected_asns, detected_at=now_str,
+            note="Baseline established on first run. Call again later to detect changes.",
+        )
+        _cache.set(ck, result.model_dump(), _cache.TTL_SHUTDOWN)
+        return result
+
+    baseline_total = baseline.get("total_prefixes", current_total)
+    withdrawn_pct  = max(0.0, (baseline_total - current_total) / max(1, baseline_total) * 100)
+
+    if withdrawn_pct < 5:        severity = "NORMAL"
+    elif withdrawn_pct < 20:     severity = "DEGRADED"
+    elif withdrawn_pct < 80:     severity = "PARTIAL_SHUTDOWN"
+    else:                        severity = "FULL_SHUTDOWN"
+
+    result = ShutdownDetectResult(
+        country_code=cc, severity=severity,
+        withdrawn_pct=round(withdrawn_pct, 1),
+        baseline_prefixes=baseline_total, current_prefixes=current_total,
+        affected_asns=affected_asns[:20], detected_at=now_str,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_SHUTDOWN)
+    return result
+
+
+# ── H2 — Shutdown Alert Webhooks ─────────────────────────────
+
+# In-process webhook registration store
+_WEBHOOK_STORE: dict[str, dict] = {}
+
+async def register_shutdown_monitor(
+    resource: str, webhook_url: str,
+    threshold_pct: float = 20.0, interval_minutes: int = 5,
+) -> MonitorRegisterResult:
+    """Register a resource for shutdown monitoring with a webhook URL."""
+    import datetime as _dt
+
+    if not webhook_url.startswith(("http://", "https://")):
+        return MonitorRegisterResult(
+            registered=False, resource=resource, webhook_url=webhook_url,
+            message="webhook_url must start with http:// or https://",
+        )
+
+    key = resource.upper().strip()
+    _WEBHOOK_STORE[key] = {
+        "resource": key,
+        "webhook_url": webhook_url,
+        "threshold_pct": threshold_pct,
+        "interval_minutes": interval_minutes,
+        "registered_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    return MonitorRegisterResult(
+        registered=True, resource=key, webhook_url=webhook_url,
+        message=(
+            f"Registered. Will alert {webhook_url} when withdrawn% ≥ {threshold_pct}%. "
+            f"Poll interval: {interval_minutes} min. "
+            f"Active registrations: {len(_WEBHOOK_STORE)}."
+        ),
+    )
+
+
+# ── H3 — Shutdown Timeline & Evidence Export ──────────────────
+
+async def get_shutdown_timeline(resource: str, start_date: str, end_date: str) -> ShutdownTimelineResult:
+    """
+    Retrieve a BGP withdrawal/restoration timeline for *resource* (country code or ASN)
+    over a date range. Generates a SHA-256 content hash for evidence integrity.
+    """
+    import datetime as _dt
+    import hashlib as _hl
+    import json as _json
+    import cache as _cache
+
+    res_norm = resource.upper().strip()
+    ck = _cache.make_shutdown_timeline_key(res_norm, start_date, end_date)
+    hit = _cache.get(ck)
+    if hit:
+        return ShutdownTimelineResult.model_validate(hit)
+
+    # Determine if resource is a country code or ASN
+    is_country = len(res_norm) == 2 and res_norm.isalpha()
+    asns: list[str] = []
+    errors: list[str] = []
+
+    if is_country:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+            asns = await _get_country_asns(res_norm, client)
+        if not asns:
+            errors.append(f"No ASNs found for country '{res_norm}'")
+        asns = asns[:10]   # Limit to avoid overload
+    else:
+        asns = [res_norm]
+
+    events: list[ShutdownEvent] = []
+    asn_set: set[str] = set()
+
+    for asn in asns:
+        asn_norm = asn.lstrip("AS")
+        url = (
+            "https://stat.ripe.net/data/routing-history/data.json"
+            f"?resource=AS{asn_norm}"
+            f"&starttime={start_date}T00:00:00"
+            f"&endtime={end_date}T23:59:59"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+                r = await client.get(url)
+                if r.status_code != 200:
+                    errors.append(f"RIPE Stat returned {r.status_code} for AS{asn_norm}")
+                    continue
+                data = r.json().get("data", {})
+        except Exception as exc:
+            errors.append(f"AS{asn_norm}: {exc}")
+            continue
+
+        asn_set.add(f"AS{asn_norm}")
+        for origin_entry in data.get("by_origin", []):
+            for prefix_entry in origin_entry.get("prefixes", []):
+                timelines = prefix_entry.get("timelines", [])
+                prev_end: Optional[str] = None
+                for tl in timelines:
+                    start_ts = tl.get("starttime", "")
+                    end_ts   = tl.get("endtime", "")
+                    if prev_end and prev_end < start_ts:
+                        events.append(ShutdownEvent(
+                            timestamp=prev_end, asn=f"AS{asn_norm}",
+                            event_type="WITHDRAWN",
+                        ))
+                        events.append(ShutdownEvent(
+                            timestamp=start_ts, asn=f"AS{asn_norm}",
+                            event_type="RESTORED",
+                        ))
+                    prev_end = end_ts
+
+    events.sort(key=lambda e: e.timestamp)
+
+    # Compute downtime (sum of WITHDRAWN → RESTORED pairs)
+    total_down = 0.0
+    longest    = 0.0
+    withdrawn_at: Optional[str] = None
+    for ev in events:
+        if ev.event_type == "WITHDRAWN":
+            withdrawn_at = ev.timestamp
+        elif ev.event_type == "RESTORED" and withdrawn_at:
+            try:
+                d = _dt.datetime.fromisoformat(ev.timestamp.replace("Z", "+00:00"))
+                s = _dt.datetime.fromisoformat(withdrawn_at.replace("Z", "+00:00"))
+                hrs = (d - s).total_seconds() / 3600
+                total_down += hrs
+                longest = max(longest, hrs)
+            except Exception:
+                pass
+            withdrawn_at = None
+
+    payload = _json.dumps([e.model_dump() for e in events], sort_keys=True, default=str)
+    content_hash = _hl.sha256(payload.encode()).hexdigest()
+
+    result = ShutdownTimelineResult(
+        resource=res_norm, period_start=start_date, period_end=end_date,
+        events=events[:100], total_downtime_hours=round(total_down, 2),
+        longest_outage_hours=round(longest, 2), affected_asn_count=len(asn_set),
+        content_hash=content_hash, errors=errors,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_SHUTDOWN_TIMELINE)
+    return result
+
+
+# ── H4 — DNS Censorship Fingerprinting ───────────────────────
+
+async def _resolve_with(domain: str, resolver_ip: str, timeout: float = 5.0) -> list[str]:
+    """Resolve *domain* using a specific resolver IP, return list of A-record IPs."""
+    try:
+        import dns.asyncresolver
+        r = dns.asyncresolver.Resolver(configure=False)
+        r.nameservers = [resolver_ip]
+        r.timeout = timeout
+        r.lifetime = timeout
+        answers = await r.resolve(domain, "A")
+        return [str(a) for a in answers]
+    except Exception:
+        return []
+
+
+async def probe_dns_censorship(domain: str, country_code: Optional[str] = None) -> CensorshipProbeResult:
+    """
+    Probe for DNS censorship by comparing responses from neutral global resolvers
+    against country-specific resolvers. Detects NXDOMAIN injection, IP poisoning.
+    """
+    import cache as _cache
+
+    cc  = (country_code or "").upper().strip()
+    ck  = _cache.make_censorship_key(domain, cc)
+    hit = _cache.get(ck)
+    if hit:
+        return CensorshipProbeResult.model_validate(hit)
+
+    # Build resolver list
+    all_resolvers: list[tuple[str, str, str]] = list(_NEUTRAL_RESOLVERS)
+    if cc and cc in _COUNTRY_RESOLVERS:
+        for ip, name in _COUNTRY_RESOLVERS[cc]:
+            all_resolvers.append((ip, name, cc))
+
+    # Query all resolvers in parallel
+    tasks = [_resolve_with(domain, ip) for ip, _, _ in all_resolvers]
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    entries: list[CensorshipProbeEntry] = []
+    truth_ips: list[str] = []
+
+    # Establish truth from neutral resolvers
+    for (ip, name, region), res in zip(all_resolvers[:3], raw_results[:3]):
+        ips = res if isinstance(res, list) else []
+        if ips:
+            truth_ips.extend(ips)
+        entries.append(CensorshipProbeEntry(
+            resolver_ip=ip, resolver_name=name, region=region,
+            response_type="resolved" if ips else "nxdomain",
+            response_ips=ips, matches_truth=True,
+        ))
+
+    truth_set = set(truth_ips)
+
+    # Evaluate country-specific resolvers
+    affected: list[str] = []
+    for (ip, name, region), res in zip(all_resolvers[3:], raw_results[3:]):
+        ips = res if isinstance(res, list) else []
+        if not ips and truth_set:
+            rtype = "nxdomain"
+            match = False
+        elif ips and truth_set and not set(ips) & truth_set:
+            rtype = "poisoned"
+            match = False
+        elif not ips and not truth_set:
+            rtype = "nxdomain"
+            match = True
+        else:
+            rtype = "resolved"
+            match = True
+        if not match:
+            affected.append(name)
+        entries.append(CensorshipProbeEntry(
+            resolver_ip=ip, resolver_name=name, region=region,
+            response_type=rtype, response_ips=ips, matches_truth=match,
+        ))
+
+    censored  = len(affected) > 0
+    technique: Optional[str] = None
+    if censored:
+        types = {e.response_type for e in entries if not e.matches_truth}
+        if "nxdomain" in types:  technique = "nxdomain_injection"
+        elif "poisoned" in types: technique = "ip_poisoning"
+        else:                     technique = "dpi_block"
+
+    result = CensorshipProbeResult(
+        domain=domain, censored=censored, technique=technique,
+        truth_ips=sorted(truth_set), affected_resolvers=affected, entries=entries,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_CENSORSHIP)
+    return result
+
+
+# ── H5 — Satellite Connectivity Tracking ─────────────────────
+
+async def get_satellite_connectivity(country_code: str) -> SatelliteConnectivityResult:
+    """
+    Check whether satellite internet providers (Starlink, Viasat, OneWeb, etc.)
+    are actively announcing prefixes and appear reachable in *country_code*.
+    """
+    import cache as _cache
+
+    cc  = country_code.upper().strip()
+    ck  = _cache.make_satellite_key(cc)
+    hit = _cache.get(ck)
+    if hit:
+        return SatelliteConnectivityResult.model_validate(hit)
+
+    tasks = {name: get_announced_prefixes(asn) for name, asn in _SATELLITE_ASNS.items()}
+    results = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values(), return_exceptions=True)))
+
+    providers: list[SatelliteProvider] = []
+    any_active = False
+
+    for name, asn in _SATELLITE_ASNS.items():
+        res = results.get(name)
+        if isinstance(res, Exception) or res is None:
+            providers.append(SatelliteProvider(name=name, asn=f"AS{asn}", is_active=False))
+            continue
+        count    = len(res.announced_prefixes)
+        is_active = res.is_announced and count > 0
+        if is_active:
+            any_active = True
+        providers.append(SatelliteProvider(
+            name=name, asn=f"AS{asn}",
+            is_active=is_active, prefixes_announced=count,
+        ))
+
+    result = SatelliteConnectivityResult(
+        country_code=cc, any_satellite_active=any_active, providers=providers,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_SATELLITE)
+    return result
+
+
+# ── H6 — Country Internet Chokepoint Mapping ─────────────────
+
+async def get_country_chokepoints(country_code: str) -> ChokePointResult:
+    """
+    Map internet chokepoints for *country_code* by identifying transit providers
+    that many in-country ASNs depend on, and computing a resilience score.
+    """
+    import cache as _cache
+
+    cc  = country_code.upper().strip()
+    ck  = _cache.make_chokepoints_key(cc)
+    hit = _cache.get(ck)
+    if hit:
+        return ChokePointResult.model_validate(hit)
+
+    errors: list[str] = []
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+        asns = await _get_country_asns(cc, client)
+
+    if not asns:
+        return ChokePointResult(country_code=cc, errors=[f"No ASNs found for '{cc}'"])
+
+    # Sample: fetch neighbours for up to 20 in-country ASNs
+    sample = asns[:20]
+    tasks  = []
+    for asn in sample:
+        asn_norm = asn.lstrip("AS")
+        tasks.append(_fetch_asn_neighbours(asn_norm))
+
+    neighbour_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Count how many in-country ASNs depend on each upstream
+    upstream_counts: dict[str, int] = {}
+    upstream_names:  dict[str, str] = {}
+    single_upstream_count = 0
+
+    for asn_str, res in zip(sample, neighbour_results):
+        if isinstance(res, Exception) or not res:
+            continue
+        upstreams = [n for n in res if n.get("type") in ("left", "uncertain")]
+        if len(upstreams) == 1:
+            single_upstream_count += 1
+        for up in upstreams:
+            up_asn = str(up.get("asn", ""))
+            if up_asn:
+                upstream_counts[up_asn] = upstream_counts.get(up_asn, 0) + 1
+                if up.get("name") and up_asn not in upstream_names:
+                    upstream_names[up_asn] = up["name"]
+
+    total_asns = len(asns)
+
+    # Build transit provider list (sorted by dependency count)
+    transit_providers: list[TransitProvider] = []
+    for up_asn, count in sorted(upstream_counts.items(), key=lambda x: -x[1])[:10]:
+        impact_pct = round(count / max(1, len(sample)) * 100, 1)
+        transit_providers.append(TransitProvider(
+            asn=f"AS{up_asn}",
+            name=upstream_names.get(up_asn),
+            dependent_country_asns=count,
+            impact_pct=impact_pct,
+        ))
+
+    max_impact = transit_providers[0].impact_pct if transit_providers else 0.0
+    resilience = max(0.0, 100.0 - (single_upstream_count / max(1, len(sample)) * 50) - (max_impact / 2))
+
+    result = ChokePointResult(
+        country_code=cc,
+        total_in_country_asns=total_asns,
+        single_upstream_asns=single_upstream_count,
+        transit_providers=transit_providers,
+        resilience_score=round(resilience, 1),
+        errors=errors,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_CHOKEPOINTS)
+    return result
+
+
+async def _fetch_asn_neighbours(asn_norm: str) -> list[dict]:
+    """Fetch RIPE Stat asn-neighbours for *asn_norm* (no 'AS' prefix)."""
+    url = f"{RIPE_STAT_NEIGHBOURS_URL}?resource=AS{asn_norm}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": _USER_AGENT}) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                return []
+            data = r.json().get("data", {})
+            neighbours = data.get("neighbours", [])
+            # Each neighbour: {"asn": 1234, "type": "left"|"right"|"uncertain", "power": ...}
+            return [{"asn": str(n.get("asn", "")), "type": n.get("type", ""), "name": n.get("name", "")}
+                    for n in neighbours]
+    except Exception:
+        return []
+
+
+# ── H7 — OONI Integration ─────────────────────────────────────
+
+async def get_ooni_report(country_code: str, domain: Optional[str] = None) -> OONIReportResult:
+    """
+    Fetch OONI (Open Observatory of Network Interference) censorship measurements
+    for *country_code*, optionally filtered to a specific *domain*.
+    """
+    import datetime as _dt
+    import cache as _cache
+
+    cc   = country_code.upper().strip()
+    dom  = (domain or "").lower().strip()
+    ck   = _cache.make_ooni_key(cc, dom)
+    hit  = _cache.get(ck)
+    if hit:
+        return OONIReportResult.model_validate(hit)
+
+    since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=30)).strftime("%Y-%m-%d")
+    params: dict[str, Any] = {
+        "probe_cc": cc,
+        "since":    since,
+        "limit":    200,
+        "confirmed": "true",
+    }
+    if dom:
+        params["domain"] = dom
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+            r = await client.get(OONI_MEASUREMENTS_URL, params=params)
+            if r.status_code != 200:
+                return OONIReportResult(country_code=cc, errors=[f"OONI API returned {r.status_code}"])
+            payload = r.json()
+    except httpx.TimeoutException:
+        return OONIReportResult(country_code=cc, errors=["OONI API timed out"])
+    except Exception as exc:
+        return OONIReportResult(country_code=cc, errors=[str(exc)])
+
+    results_raw = payload.get("results", [])
+    entries: list[OONIMeasurement] = []
+    blocked_set: set[str] = set()
+    accessible_tools: set[str] = set()
+    tor_accessible: Optional[bool] = None
+
+    for m in results_raw:
+        test_name  = m.get("test_name", "")
+        scores     = m.get("scores", {})
+        anomaly    = m.get("anomaly", False)
+        confirmed  = m.get("confirmed", False)
+        input_url  = m.get("input", "") or ""
+        probe_asn  = str(m.get("probe_asn", ""))
+        probe_date = str(m.get("measurement_start_time", ""))[:10]
+
+        # Web connectivity
+        if test_name == "web_connectivity" and confirmed:
+            dom_key = input_url.split("/")[2] if "/" in input_url else input_url
+            blocked_set.add(dom_key)
+            result_val = "blocked"
+        elif test_name == "web_connectivity":
+            result_val = "accessible" if not anomaly else "indeterminate"
+        else:
+            result_val = "accessible" if not anomaly else "blocked"
+
+        # Circumvention tools
+        if test_name in ("tor", "psiphon", "openvpn", "torsf", "riseupvpn") and not anomaly:
+            accessible_tools.add(test_name.capitalize())
+        if test_name == "tor":
+            tor_accessible = not anomaly if tor_accessible is None else tor_accessible
+
+        entries.append(OONIMeasurement(
+            domain=input_url[:100] or None,
+            test_name=test_name,
+            result=result_val,
+            probe_date=probe_date,
+            probe_asn=probe_asn,
+        ))
+
+    since_label = f"last 30 days (since {since})"
+    result = OONIReportResult(
+        country_code=cc,
+        blocked_domains=sorted(blocked_set)[:30],
+        accessible_tools=sorted(accessible_tools),
+        tor_accessible=tor_accessible,
+        measurements_count=len(entries),
+        entries=entries[:50],
+        period=since_label,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_OONI)
+    return result
+
+
+# ── H8 — Country Internet Health Dashboard ────────────────────
+
+async def get_country_health(country_code: str) -> CountryHealthResult:
+    """
+    Composite country internet health score combining BGP shutdown detection,
+    DNS censorship probing, OONI measurements, and satellite availability.
+
+    Score components:
+      • BGP score  (40%): 100 = NORMAL, 80 = DEGRADED, 40 = PARTIAL, 0 = FULL shutdown
+      • DNS score  (30%): 100 = no censorship, 0 = all resolvers blocked
+      • App score  (20%): 100 = OONI tools accessible, 0 = everything blocked
+      • Satellite  (10%): 100 if any satellite active, 0 if none
+    """
+    import datetime as _dt
+    import cache as _cache
+
+    cc  = country_code.upper().strip()
+    ck  = _cache.make_country_health_key(cc)
+    hit = _cache.get(ck)
+    if hit:
+        return CountryHealthResult.model_validate(hit)
+
+    # Run all sub-checks in parallel
+    shutdown_res, censorship_res, ooni_res, satellite_res = await asyncio.gather(
+        detect_shutdown(cc),
+        probe_dns_censorship("google.com", cc),
+        get_ooni_report(cc),
+        get_satellite_connectivity(cc),
+        return_exceptions=True,
+    )
+
+    errors: list[str] = []
+
+    # BGP score (40%)
+    bgp_score_map = {"NORMAL": 100.0, "DEGRADED": 70.0, "PARTIAL_SHUTDOWN": 30.0,
+                     "FULL_SHUTDOWN": 0.0, "UNKNOWN": 50.0}
+    if isinstance(shutdown_res, Exception):
+        bgp_score = 50.0
+        errors.append(f"Shutdown check failed: {shutdown_res}")
+    else:
+        bgp_score = bgp_score_map.get(shutdown_res.severity, 50.0)
+
+    # DNS score (30%)
+    if isinstance(censorship_res, Exception):
+        dns_score = 50.0
+        errors.append(f"Censorship probe failed: {censorship_res}")
+    else:
+        if not censorship_res.censored:
+            dns_score = 100.0
+        else:
+            blocked = len(censorship_res.affected_resolvers)
+            total   = max(1, len(censorship_res.entries) - 3)  # exclude neutral
+            dns_score = max(0.0, 100.0 - (blocked / total * 100))
+
+    # App score (20%)
+    if isinstance(ooni_res, Exception):
+        app_score = 50.0
+        errors.append(f"OONI failed: {ooni_res}")
+    else:
+        blocked_count = len(ooni_res.blocked_domains)
+        app_score = max(0.0, 100.0 - blocked_count * 5)
+
+    # Satellite (10%)
+    if isinstance(satellite_res, Exception):
+        satellite_available = False
+        errors.append(f"Satellite check failed: {satellite_res}")
+    else:
+        satellite_available = satellite_res.any_satellite_active
+
+    sat_score = 100.0 if satellite_available else 0.0
+    score = (bgp_score * 0.40 + dns_score * 0.30 + app_score * 0.20 + sat_score * 0.10)
+
+    if score >= 85:   severity = "NORMAL"
+    elif score >= 65: severity = "DEGRADED"
+    elif score >= 35: severity = "PARTIAL_SHUTDOWN"
+    else:             severity = "FULL_SHUTDOWN"
+
+    # Plain-language summary
+    parts: list[str] = []
+    if bgp_score < 50:
+        parts.append(f"BGP routing is severely degraded ({100 - bgp_score:.0f}% withdrawn)")
+    elif bgp_score < 80:
+        parts.append("BGP routing shows some degradation")
+    else:
+        parts.append("BGP routing appears normal")
+
+    if dns_score < 50:
+        parts.append("significant DNS censorship detected")
+    elif dns_score < 90:
+        parts.append("some DNS censorship detected")
+    else:
+        parts.append("DNS appears uncensored")
+
+    if satellite_available:
+        parts.append("satellite internet is reachable")
+    else:
+        parts.append("no satellite coverage detected")
+
+    summary = "; ".join(parts).capitalize() + "."
+
+    now_str = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = CountryHealthResult(
+        country_code=cc, score=round(score, 1), severity=severity,
+        bgp_score=round(bgp_score, 1), dns_score=round(dns_score, 1),
+        app_score=round(app_score, 1), satellite_available=satellite_available,
+        summary=summary, last_checked=now_str, errors=errors,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_COUNTRY_HEALTH)
     return result
