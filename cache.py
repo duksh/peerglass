@@ -39,6 +39,14 @@ TTL_PEERING  = 21_600   # 6 hours   — PeeringDB records are fairly stable
 TTL_IXP      = 43_200   # 12 hours  — IXP list changes slowly
 TTL_HEALTH   = 300      # 5 minutes — combined health check has live BGP data
 
+# DNS TTLs
+TTL_DNS_RESOLVE    = 300       # 5 minutes  — DNS can change quickly
+TTL_DNS_ENUMERATE  = 300       # 5 minutes
+TTL_DNS_DNSSEC     = 3_600     # 1 hour     — DNSSEC chains are stable
+TTL_DNS_DNSBL      = 3_600     # 1 hour     — blocklist status is semi-static
+TTL_DNS_EMAIL      = 3_600     # 1 hour     — SPF/DMARC/DKIM change rarely
+TTL_DNS_PROPAGATION = 120      # 2 minutes  — propagation is time-sensitive
+
 # ── In-memory store ─────────────────────────────────────────
 _STORE: dict[str, tuple[Any, float]] = {}
 
@@ -120,6 +128,24 @@ def make_ixp_key(query: str) -> str:
 
 def make_health_key(resource: str) -> str:
     return _make_key("health", resource.lower().strip())
+
+def make_dns_resolve_key(target: str) -> str:
+    return _make_key("dns_resolve", target.lower().strip())
+
+def make_dns_enumerate_key(domain: str) -> str:
+    return _make_key("dns_enumerate", domain.lower().strip())
+
+def make_dns_dnssec_key(domain: str) -> str:
+    return _make_key("dns_dnssec", domain.lower().strip())
+
+def make_dns_dnsbl_key(ip: str) -> str:
+    return _make_key("dns_dnsbl", ip.strip())
+
+def make_dns_email_key(domain: str) -> str:
+    return _make_key("dns_email", domain.lower().strip())
+
+def make_dns_propagation_key(domain: str, record_type: str) -> str:
+    return _make_key("dns_propagation", domain.lower().strip(), record_type.upper())
 
 
 # ── Monitor Store — persistent baselines for change detection ──

@@ -1956,3 +1956,572 @@ async def run_change_monitor(resource: str, reset_baseline: bool = False) -> Cha
         current_rir          = current.get("rir"),
         message              = msg,
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# Sprint 2 — DNS Features (E1, E2, E3, E4, E5, E7)
+# ══════════════════════════════════════════════════════════════
+
+import dns.asyncresolver
+import dns.resolver
+import dns.reversename
+import dns.rdatatype
+import dns.name
+import dns.exception
+import dns.rdata
+
+from models import (
+    DNSResolveResult, DNSRecord, DNSEnumerateResult, DNSSECResult,
+    DNSBLEntry, DNSBLResult, EmailSecurityResult,
+    PropagationEntry, DNSPropagationResult,
+)
+
+# ── DNSBL list: (zone, human-readable description) ───────────
+_DNSBL_LISTS: list[tuple[str, str]] = [
+    ("zen.spamhaus.org",         "Spamhaus ZEN (SBL + XBL + PBL)"),
+    ("bl.spamcop.net",           "SpamCop BL"),
+    ("b.barracudacentral.org",   "Barracuda Reputation Block"),
+    ("cbl.abuseat.org",          "CBL — Composite Blocking List"),
+    ("dnsbl.sorbs.net",          "SORBS Combined"),
+    ("spam.dnsbl.sorbs.net",     "SORBS Spam"),
+    ("http.dnsbl.sorbs.net",     "SORBS HTTP Proxy"),
+    ("socks.dnsbl.sorbs.net",    "SORBS SOCKS Proxy"),
+    ("misc.dnsbl.sorbs.net",     "SORBS Misc Proxy"),
+    ("smtp.dnsbl.sorbs.net",     "SORBS SMTP"),
+    ("new.spam.dnsbl.sorbs.net", "SORBS New Spam"),
+    ("dnsbl-1.uceprotect.net",   "UCEProtect Level 1"),
+    ("dnsbl-2.uceprotect.net",   "UCEProtect Level 2"),
+    ("dnsbl-3.uceprotect.net",   "UCEProtect Level 3"),
+    ("db.wpbl.info",             "WPBL"),
+    ("ix.dnsbl.manitu.net",      "Manitu NiX Spam"),
+    ("truncate.gbudb.net",       "GBUdb Truncate"),
+    ("bl.0spam.org",             "0spam"),
+    ("dnsbl.spfbl.net",          "SPFBL"),
+    ("all.s5h.net",              "s5h.net Spam"),
+    ("dyna.spamrats.com",        "SpamRATS Dynamic"),
+    ("noptr.spamrats.com",       "SpamRATS No-PTR"),
+    ("spam.spamrats.com",        "SpamRATS Spam"),
+    ("ips.backscatterer.org",    "Backscatterer"),
+    ("psbl.surriel.com",         "PSBL — Passive Spam Block"),
+    ("drone.abuse.ch",           "Abuse.ch Drone"),
+    ("dronebl.org",              "DroneBL"),
+    ("rbl.megarbl.net",          "MegaRBL"),
+    ("ubl.unsubscore.com",       "Unsubscore UBL"),
+    ("bogons.cymru.com",         "Bogons — unallocated space"),
+]
+
+# Spamhaus ZEN return-code descriptions
+_SPAMHAUS_CODES: dict[str, str] = {
+    "127.0.0.2":  "SBL — spam source",
+    "127.0.0.3":  "SBL CSS — compromised server",
+    "127.0.0.4":  "XBL — CBL listed (exploited host)",
+    "127.0.0.5":  "XBL — CBL listed (exploited host)",
+    "127.0.0.6":  "XBL — CBL listed (exploited host)",
+    "127.0.0.7":  "XBL — CBL listed (exploited host)",
+    "127.0.0.9":  "SBL + DROP listed",
+    "127.0.0.10": "PBL — ISP dynamic address range",
+    "127.0.0.11": "PBL — end-user IP",
+}
+
+# 10 global resolvers for propagation checks
+_PROPAGATION_RESOLVERS: list[tuple[str, str, str]] = [
+    ("8.8.8.8",          "Google",         "US"),
+    ("8.8.4.4",          "Google (2)",     "US"),
+    ("1.1.1.1",          "Cloudflare",     "US"),
+    ("1.0.0.1",          "Cloudflare (2)", "US"),
+    ("9.9.9.9",          "Quad9",          "CH"),
+    ("208.67.222.222",   "OpenDNS",        "US"),
+    ("94.140.14.14",     "AdGuard",        "RU"),
+    ("185.228.168.9",    "CleanBrowsing",  "US"),
+    ("64.6.64.6",        "Verisign",       "US"),
+    ("149.112.112.112",  "Quad9 (2)",      "US"),
+]
+
+# Common DKIM selectors to probe
+_DKIM_SELECTORS = [
+    "default", "google", "selector1", "selector2",
+    "mail", "k1", "k2", "dkim", "email", "s1", "s2",
+]
+
+
+async def _dns_query(name: str, rdtype: str, resolver: Optional[dns.asyncresolver.Resolver] = None) -> list[str]:
+    """Resolve a DNS query, returning all rdata values as strings. Empty list on NXDOMAIN/error."""
+    try:
+        res = resolver or dns.asyncresolver.get_default_resolver()
+        answer = await res.resolve(name, rdtype, raise_on_no_answer=False)
+        if answer.rrset is None:
+            return []
+        return [r.to_text() for r in answer.rrset]
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.exception.Timeout):
+        return []
+    except Exception:
+        return []
+
+
+# ── E1 — Forward & Reverse DNS Resolution ────────────────────
+
+async def dns_resolve(target: str) -> DNSResolveResult:
+    """
+    Resolve A/AAAA records for a domain, or PTR records for an IP address.
+    For IP inputs, also correlates with RDAP owner to flag PTR mismatches.
+    """
+    target = target.strip()
+    is_ip = False
+    errors: list[str] = []
+
+    # Detect if target is an IP address
+    try:
+        ipaddress.ip_address(target)
+        is_ip = True
+    except ValueError:
+        pass
+
+    ptr_records: list[str] = []
+    a_records: list[str] = []
+    aaaa_records: list[str] = []
+    rdap_org: Optional[str] = None
+    rdap_mismatch = False
+
+    if is_ip:
+        # Reverse DNS lookup
+        try:
+            rev_name = dns.reversename.from_address(target)
+            ptr_records = await _dns_query(str(rev_name), "PTR")
+        except Exception as e:
+            errors.append(f"PTR lookup failed: {e}")
+
+        # Correlate with RDAP to detect PTR mismatches
+        try:
+            async with httpx.AsyncClient() as client:
+                base_url = await _find_authoritative_base_url(target, "ip", client)
+            if base_url:
+                rdap_result = await query_authoritative_rir(target, "ip")
+                if rdap_result and rdap_result.status == "ok" and rdap_result.data:
+                    from normalizer import normalize_ip_response
+                    nr = normalize_ip_response(rdap_result.rir.value, rdap_result.data)
+                    rdap_org = nr.org_name or nr.name
+                    if rdap_org and ptr_records:
+                        # Flag if none of the PTR hostnames contain a fragment of the RDAP org
+                        org_fragment = rdap_org.lower().split()[0][:6]
+                        if not any(org_fragment in p.lower() for p in ptr_records):
+                            rdap_mismatch = True
+        except Exception:
+            pass
+    else:
+        # Forward DNS lookup
+        a_records    = await _dns_query(target, "A")
+        aaaa_records = await _dns_query(target, "AAAA")
+
+    return DNSResolveResult(
+        target=target,
+        is_ip=is_ip,
+        ptr_records=ptr_records,
+        a_records=a_records,
+        aaaa_records=aaaa_records,
+        rdap_org=rdap_org,
+        rdap_mismatch=rdap_mismatch,
+        errors=errors,
+    )
+
+
+# ── E2 — Full DNS Record Enumeration ─────────────────────────
+
+async def dns_enumerate(domain: str) -> DNSEnumerateResult:
+    """
+    Fetch all common DNS record types (A, AAAA, MX, NS, SOA, TXT, CAA,
+    DNSKEY, SRV, CNAME) for a domain. Flags SPF and DMARC values from TXT.
+    """
+    domain = domain.strip().lower()
+    record_types = ["A", "AAAA", "MX", "NS", "SOA", "TXT", "CAA", "DNSKEY", "SRV", "CNAME"]
+    records: dict[str, list[DNSRecord]] = {}
+    errors: list[str] = []
+    spf_value: Optional[str] = None
+    dmarc_value: Optional[str] = None
+
+    async def _fetch(rtype: str) -> list[DNSRecord]:
+        try:
+            resolver = dns.asyncresolver.get_default_resolver()
+            answer = await resolver.resolve(domain, rtype, raise_on_no_answer=False)
+            if answer.rrset is None:
+                return []
+            result_records = []
+            for rdata_item in answer.rrset:
+                result_records.append(DNSRecord(
+                    rtype=rtype,
+                    value=rdata_item.to_text(),
+                    ttl=answer.rrset.ttl,
+                ))
+            return result_records
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.exception.Timeout):
+            return []
+        except Exception as e:
+            errors.append(f"{rtype}: {e}")
+            return []
+
+    tasks = {rtype: _fetch(rtype) for rtype in record_types}
+    for rtype, coro in tasks.items():
+        recs = await coro
+        if recs:
+            records[rtype] = recs
+
+    # Extract SPF from TXT records
+    for rec in records.get("TXT", []):
+        stripped = rec.value.strip('"')
+        if stripped.startswith("v=spf1"):
+            spf_value = stripped
+            break
+
+    # Try DMARC TXT at _dmarc subdomain
+    try:
+        dmarc_txts = await _dns_query(f"_dmarc.{domain}", "TXT")
+        for txt in dmarc_txts:
+            if "v=DMARC1" in txt:
+                dmarc_value = txt.strip('"')
+                break
+    except Exception:
+        pass
+
+    return DNSEnumerateResult(
+        domain=domain,
+        records=records,
+        spf_value=spf_value,
+        dmarc_value=dmarc_value,
+        errors=errors,
+    )
+
+
+# ── E3 — DNSSEC Chain Validation ─────────────────────────────
+
+async def dns_dnssec(domain: str) -> DNSSECResult:
+    """
+    Check DNSSEC deployment for a domain.
+    Returns SECURE / INSECURE / BOGUS / INDETERMINATE.
+
+    SECURE:        DNSKEY + RRSIG + DS all present and consistent.
+    INSECURE:      DNSKEY present but no DS at parent (not delegated).
+    BOGUS:         Records present but RRSIG expiry issues or mismatch.
+    INDETERMINATE: Cannot determine status (query failures).
+    """
+    domain = domain.strip().lower()
+    errors: list[str] = []
+    has_dnskey = False
+    has_rrsig = False
+    has_ds = False
+    sig_expiry: Optional[str] = None
+
+    try:
+        # Check DNSKEY at domain
+        dnskeys = await _dns_query(domain, "DNSKEY")
+        has_dnskey = len(dnskeys) > 0
+
+        # Check RRSIG (signature records) for A or SOA
+        try:
+            resolver = dns.asyncresolver.get_default_resolver()
+            answer = await resolver.resolve(domain, "RRSIG", raise_on_no_answer=False)
+            if answer.rrset:
+                has_rrsig = True
+                # Extract expiry from first RRSIG
+                for rdata_item in answer.rrset:
+                    txt = rdata_item.to_text()
+                    parts = txt.split()
+                    if len(parts) >= 5:
+                        expiry_raw = parts[4]
+                        # RRSIG expiry is YYYYMMDDHHmmss
+                        if len(expiry_raw) == 14:
+                            sig_expiry = f"{expiry_raw[:4]}-{expiry_raw[4:6]}-{expiry_raw[6:8]}"
+                    break
+        except Exception:
+            pass
+
+        # Check DS record at parent zone
+        parent = ".".join(domain.split(".")[1:]) if "." in domain else ""
+        if parent:
+            ds_records = await _dns_query(domain, "DS")
+            has_ds = len(ds_records) > 0
+
+    except Exception as e:
+        errors.append(str(e))
+
+    # Determine status
+    if errors and not has_dnskey:
+        status = "INDETERMINATE"
+    elif has_dnskey and has_rrsig and has_ds:
+        status = "SECURE"
+    elif has_dnskey and has_rrsig and not has_ds:
+        # Signed but not delegated — technically insecure from resolver's perspective
+        status = "INSECURE"
+    elif has_dnskey and not has_rrsig:
+        status = "BOGUS"
+    else:
+        status = "INSECURE"
+
+    return DNSSECResult(
+        domain=domain,
+        status=status,
+        has_dnskey=has_dnskey,
+        has_rrsig=has_rrsig,
+        has_ds=has_ds,
+        signature_expiry=sig_expiry,
+        errors=errors,
+    )
+
+
+# ── E4 — DNSBL Blocklist Checking ────────────────────────────
+
+async def dns_dnsbl(ip: str) -> DNSBLResult:
+    """
+    Check an IPv4 address against 30 DNS blocklists in parallel.
+    Uses pure DNS A-record lookups — no external APIs or keys needed.
+    """
+    ip = ip.strip()
+    errors: list[str] = []
+
+    # Reverse the IP octets for DNSBL queries: 1.2.3.4 → 4.3.2.1
+    try:
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return DNSBLResult(ip=ip, errors=["Only IPv4 is supported for DNSBL checks"])
+        reversed_ip = ".".join(reversed(parts))
+    except Exception as e:
+        return DNSBLResult(ip=ip, errors=[f"Invalid IP: {e}"])
+
+    async def _check_one(zone: str, desc: str) -> DNSBLEntry:
+        query_name = f"{reversed_ip}.{zone}"
+        try:
+            resolver = dns.asyncresolver.get_default_resolver()
+            answer = await resolver.resolve(query_name, "A", raise_on_no_answer=False)
+            if answer.rrset:
+                return_code = answer.rrset[0].to_text()
+                detail = _SPAMHAUS_CODES.get(return_code) if "spamhaus" in zone else None
+                return DNSBLEntry(
+                    list_name=zone,
+                    list_description=desc,
+                    listed=True,
+                    return_code=return_code,
+                    description=detail,
+                )
+            return DNSBLEntry(list_name=zone, list_description=desc, listed=False)
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            return DNSBLEntry(list_name=zone, list_description=desc, listed=False)
+        except dns.exception.Timeout:
+            return DNSBLEntry(list_name=zone, list_description=desc, listed=False,
+                              description="timeout")
+        except Exception:
+            return DNSBLEntry(list_name=zone, list_description=desc, listed=False)
+
+    tasks = [_check_one(zone, desc) for zone, desc in _DNSBL_LISTS]
+    entries: list[DNSBLEntry] = list(await asyncio.gather(*tasks))
+    listed_count = sum(1 for e in entries if e.listed)
+
+    return DNSBLResult(
+        ip=ip,
+        listed_count=listed_count,
+        checked_count=len(entries),
+        entries=entries,
+        errors=errors,
+    )
+
+
+# ── E5 — Email Security Record Analysis ──────────────────────
+
+async def dns_email_security(domain: str) -> EmailSecurityResult:
+    """
+    Comprehensive email security audit: SPF, DMARC, DKIM, MX.
+    All pure DNS — no external APIs or keys needed.
+    """
+    domain = domain.strip().lower()
+    errors: list[str] = []
+    recommendations: list[str] = []
+
+    # --- SPF ---
+    spf_record: Optional[str] = None
+    spf_valid = False
+    spf_all_mechanism: Optional[str] = None
+
+    try:
+        txts = await _dns_query(domain, "TXT")
+        for txt in txts:
+            clean = txt.strip('"')
+            if clean.startswith("v=spf1"):
+                spf_record = clean
+                spf_valid = True
+                # Extract the 'all' qualifier
+                for part in clean.split():
+                    if part.endswith("all"):
+                        spf_all_mechanism = part  # e.g. -all, ~all, +all
+                break
+    except Exception as e:
+        errors.append(f"SPF: {e}")
+
+    if not spf_valid:
+        recommendations.append("Add an SPF record (v=spf1) to prevent email spoofing.")
+    elif spf_all_mechanism in ("+all", "?all", None):
+        recommendations.append("SPF -all or ~all is recommended; +all permits any sender.")
+
+    # --- DMARC ---
+    dmarc_present = False
+    dmarc_policy: Optional[str] = None
+    dmarc_rua: Optional[str] = None
+    dmarc_ruf: Optional[str] = None
+
+    try:
+        dmarc_txts = await _dns_query(f"_dmarc.{domain}", "TXT")
+        for txt in dmarc_txts:
+            clean = txt.strip('"')
+            if "v=DMARC1" in clean:
+                dmarc_present = True
+                for tag in clean.split(";"):
+                    tag = tag.strip()
+                    if tag.startswith("p="):
+                        dmarc_policy = tag[2:].strip()
+                    elif tag.startswith("rua="):
+                        dmarc_rua = tag[4:].strip()
+                    elif tag.startswith("ruf="):
+                        dmarc_ruf = tag[4:].strip()
+                break
+    except Exception as e:
+        errors.append(f"DMARC: {e}")
+
+    if not dmarc_present:
+        recommendations.append("Add a DMARC record (_dmarc.<domain>) to enable policy enforcement.")
+    elif dmarc_policy == "none":
+        recommendations.append("Upgrade DMARC policy from p=none to p=quarantine or p=reject.")
+
+    # --- DKIM (probe common selectors) ---
+    dkim_selectors_found: list[str] = []
+    try:
+        async def _probe_dkim(selector: str) -> Optional[str]:
+            txts = await _dns_query(f"{selector}._domainkey.{domain}", "TXT")
+            for txt in txts:
+                if "v=DKIM1" in txt or "k=rsa" in txt or "p=" in txt:
+                    return selector
+            return None
+
+        tasks = [_probe_dkim(s) for s in _DKIM_SELECTORS]
+        results_raw = await asyncio.gather(*tasks)
+        dkim_selectors_found = [s for s in results_raw if s is not None]
+    except Exception as e:
+        errors.append(f"DKIM: {e}")
+
+    if not dkim_selectors_found:
+        recommendations.append("No DKIM selectors found; configure DKIM signing for outbound mail.")
+
+    # --- MX ---
+    mx_records: list[str] = []
+    try:
+        mx_raw = await _dns_query(domain, "MX")
+        mx_records = sorted(mx_raw)
+    except Exception as e:
+        errors.append(f"MX: {e}")
+
+    # --- BIMI ---
+    bimi_present = False
+    try:
+        bimi_txts = await _dns_query(f"default._bimi.{domain}", "TXT")
+        bimi_present = any("v=BIMI1" in t for t in bimi_txts)
+    except Exception:
+        pass
+
+    # --- Risk level ---
+    if not spf_valid and not dmarc_present:
+        risk_level = "CRITICAL"
+        recommendations.insert(0, "Domain has no SPF or DMARC — trivially spoofable.")
+    elif not spf_valid or not dmarc_present:
+        risk_level = "HIGH"
+    elif dmarc_policy == "none":
+        risk_level = "MEDIUM"
+    elif spf_all_mechanism in ("+all", "?all"):
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+
+    return EmailSecurityResult(
+        domain=domain,
+        spf_valid=spf_valid,
+        spf_record=spf_record,
+        spf_all_mechanism=spf_all_mechanism,
+        dmarc_present=dmarc_present,
+        dmarc_policy=dmarc_policy,
+        dmarc_rua=dmarc_rua,
+        dmarc_ruf=dmarc_ruf,
+        dkim_selectors_found=dkim_selectors_found,
+        mx_records=mx_records,
+        bimi_present=bimi_present,
+        risk_level=risk_level,
+        recommendations=recommendations,
+        errors=errors,
+    )
+
+
+# ── E7 — DNS Propagation Check ───────────────────────────────
+
+async def dns_propagation(domain: str, record_type: str = "A") -> DNSPropagationResult:
+    """
+    Query the same domain from 10 geographically distributed public
+    resolvers and compare results to detect propagation lag.
+    """
+    domain = domain.strip().lower()
+    record_type = record_type.upper()
+    errors: list[str] = []
+    entries: list[PropagationEntry] = []
+
+    async def _query_resolver(resolver_ip: str, name: str, region: str) -> PropagationEntry:
+        try:
+            resolver = dns.asyncresolver.Resolver(configure=False)
+            resolver.nameservers = [resolver_ip]
+            resolver.timeout = 5.0
+            resolver.lifetime = 5.0
+            answer = await resolver.resolve(domain, record_type, raise_on_no_answer=False)
+            if answer.rrset:
+                response = sorted(r.to_text() for r in answer.rrset)
+            else:
+                response = []
+            return PropagationEntry(
+                resolver_ip=resolver_ip,
+                resolver_name=name,
+                region=region,
+                response=response,
+            )
+        except dns.exception.Timeout:
+            return PropagationEntry(
+                resolver_ip=resolver_ip, resolver_name=name, region=region,
+                error="timeout",
+            )
+        except Exception as e:
+            return PropagationEntry(
+                resolver_ip=resolver_ip, resolver_name=name, region=region,
+                error=str(e)[:80],
+            )
+
+    tasks = [_query_resolver(ip, name, region) for ip, name, region in _PROPAGATION_RESOLVERS]
+    entries = list(await asyncio.gather(*tasks))
+
+    # Find majority answer (most common response among successful entries)
+    from collections import Counter
+    response_counts: Counter = Counter()
+    for e in entries:
+        if not e.error and e.response:
+            response_counts[tuple(e.response)] += 1
+
+    majority_answer: list[str] = []
+    if response_counts:
+        majority_tuple, _ = response_counts.most_common(1)[0]
+        majority_answer = list(majority_tuple)
+
+    # Mark each entry as matching majority or not
+    for e in entries:
+        e.matches_majority = (e.response == majority_answer and not e.error)
+
+    propagated_count = sum(1 for e in entries if e.matches_majority)
+    consistent = propagated_count == len(entries)
+
+    return DNSPropagationResult(
+        domain=domain,
+        record_type=record_type,
+        majority_answer=majority_answer,
+        consistent=consistent,
+        propagated_count=propagated_count,
+        total_resolvers=len(entries),
+        entries=entries,
+        errors=errors,
+    )

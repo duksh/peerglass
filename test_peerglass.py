@@ -109,19 +109,19 @@ else:
 
 
 # ── 7. TOOL COUNT ────────────────────────────────────────────
-print("\n7. TOOL COUNT — 17 @mcp.tool() decorators in server.py")
+print("\n7. TOOL COUNT — 23 @mcp.tool() decorators in server.py")
 # Decorator is @mcp.tool( with description kwarg on next line
 tools_found = re.findall(r"@mcp\.tool\(", server_src)
 count = len(tools_found)
-if count == 17:
+if count == 23:
     print(f"   ✅ {count} @mcp.tool() decorators found")
 else:
-    print(f"   ❌ Expected 17, found {count}")
+    print(f"   ❌ Expected 23, found {count}")
     errors.append(f"tool_count:{count}")
 
 
 # ── 8. REST ENDPOINTS ────────────────────────────────────────
-print("\n8. REST API — all 15 endpoints present in api.py")
+print("\n8. REST API — all 21 endpoints present in api.py")
 api_src = open("api.py").read()
 routes = [
     "/v1/ip/{ip}",           "/v1/asn/{asn}",
@@ -132,6 +132,9 @@ routes = [
     "/v1/overview/{prefix}", "/v1/peering/{asn}",
     "/v1/ixp",               "/v1/health/{resource}",
     "/v1/monitor/{resource}",
+    "/v1/dns/resolve/{target}",  "/v1/dns/enumerate/{domain}",
+    "/v1/dns/dnssec/{domain}",   "/v1/dns/dnsbl/{ip}",
+    "/v1/dns/email/{domain}",    "/v1/dns/propagation/{domain}",
 ]
 for r in routes:
     if r in api_src:
@@ -152,9 +155,9 @@ try:
     r = client.get("/")
     assert r.status_code == 200, f"Root returned {r.status_code}"
     data = r.json()
-    assert data["tools"] == 17, f"Root shows {data['tools']} tools not 17"
+    assert data["tools"] == 23, f"Root shows {data['tools']} tools not 23"
     assert data["name"] == "PeerGlass API", f"Name is {data['name']}"
-    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=17")
+    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=23")
 
     r = client.get("/v1/meta/cache")
     assert r.status_code == 200
@@ -186,12 +189,12 @@ except Exception as e:
 
 
 # ── 10. README ───────────────────────────────────────────────
-print("\n10. README — PeerGlass branding, 17 tools, RDAP note, historical-whois explained")
+print("\n10. README — PeerGlass branding, 23 tools, RDAP note, historical-whois explained")
 readme = open("README.md").read()
 
 must_contain = [
     ("PeerGlass",              "Product name present"),
-    ("17 tools",               "Correct tool count (17)"),
+    ("23 tools",               "Correct tool count (23)"),
     ("RDAP (RFC 7480",         "RDAP RFC reference"),
     ("Protocol note",          "WHOIS→RDAP explanation block"),
     ("peerglass",              "MCP config uses peerglass"),
@@ -333,6 +336,89 @@ except Exception as e:
     print(f"   ❌ A1: IPv6 CIDR matching failed: {e}")
     errors.append(f"sprint1:A1:logic:{e}")
 
+
+# ── SECTION 12 — SPRINT 2 (DNS features E1–E5, E7) ───────────
+print("\n12. SPRINT 2 — DNS features (E1–E5, E7)")
+
+# E1: dns_resolve present in rir_client
+import rir_client as _rc2
+for fn_name in ["dns_resolve", "dns_enumerate", "dns_dnssec", "dns_dnsbl", "dns_email_security", "dns_propagation"]:
+    if hasattr(_rc2, fn_name):
+        print(f"   ✅ E: rir_client.{fn_name} present")
+    else:
+        print(f"   ❌ E: rir_client.{fn_name} MISSING")
+        errors.append(f"sprint2:client:{fn_name}")
+
+# DNS models present
+try:
+    from models import (
+        DNSResolveInput, DNSResolveResult, DNSRecord,
+        DNSEnumerateInput, DNSEnumerateResult,
+        DNSSECInput, DNSSECResult,
+        DNSBLInput, DNSBLResult, DNSBLEntry,
+        EmailSecurityInput, EmailSecurityResult,
+        DNSPropagationInput, DNSPropagationResult, PropagationEntry,
+    )
+    print("   ✅ Sprint 2: all DNS Pydantic models importable")
+except Exception as e:
+    print(f"   ❌ Sprint 2: DNS models import failed: {e}")
+    errors.append(f"sprint2:models:{e}")
+
+# DNS formatter functions present
+try:
+    from formatters import (
+        format_dns_resolve_md,
+        format_dns_enumerate_md,
+        format_dns_dnssec_md,
+        format_dns_dnsbl_md,
+        format_email_security_md,
+        format_dns_propagation_md,
+    )
+    print("   ✅ Sprint 2: all DNS formatter functions importable")
+except Exception as e:
+    print(f"   ❌ Sprint 2: DNS formatters import failed: {e}")
+    errors.append(f"sprint2:formatters:{e}")
+
+# DNS MCP tools in server.py
+dns_mcp_tools = [
+    "peerglass_dns_resolve", "peerglass_dns_enumerate", "peerglass_dns_dnssec",
+    "peerglass_dns_dnsbl", "peerglass_dns_email_security", "peerglass_dns_propagation",
+]
+for tool in dns_mcp_tools:
+    if tool in server_src:
+        print(f"   ✅ E: MCP tool {tool} present in server.py")
+    else:
+        print(f"   ❌ E: MCP tool {tool} MISSING from server.py")
+        errors.append(f"sprint2:mcp:{tool}")
+
+# DNS API endpoints in api.py
+api_src2 = open("api.py").read()
+dns_routes = [
+    "/v1/dns/resolve/{target}", "/v1/dns/enumerate/{domain}",
+    "/v1/dns/dnssec/{domain}",  "/v1/dns/dnsbl/{ip}",
+    "/v1/dns/email/{domain}",   "/v1/dns/propagation/{domain}",
+]
+for route in dns_routes:
+    if route in api_src2:
+        print(f"   ✅ E: REST route {route} present")
+    else:
+        print(f"   ❌ E: REST route {route} MISSING")
+        errors.append(f"sprint2:route:{route}")
+
+# DNS TTL constants in cache.py
+cache_src = open("cache.py").read()
+dns_ttl_keys = [
+    "TTL_DNS_RESOLVE", "TTL_DNS_ENUMERATE", "TTL_DNS_DNSSEC",
+    "TTL_DNS_DNSBL", "TTL_DNS_EMAIL", "TTL_DNS_PROPAGATION",
+]
+for k in dns_ttl_keys:
+    if k in cache_src:
+        print(f"   ✅ E: cache.{k} present")
+    else:
+        print(f"   ❌ E: cache.{k} MISSING")
+        errors.append(f"sprint2:cache:{k}")
+
+
 # ── SUMMARY ──────────────────────────────────────────────────
 print()
 print("=" * 60)
@@ -340,8 +426,8 @@ if not errors:
     print("✅ ALL TESTS PASSED — 0 errors")
     print()
     print("  Python files:         7  (all compile clean)")
-    print("  MCP tools:            17")
-    print("  REST endpoints:       15")
+    print("  MCP tools:            23")
+    print("  REST endpoints:       21")
     print("  Protocol:             RDAP throughout (RFC 7480-7484)")
     print("  Branding:             PeerGlass throughout")
     print("  historical-whois:     correctly attributed to RIPE Stat API naming")

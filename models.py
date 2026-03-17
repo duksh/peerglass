@@ -731,3 +731,179 @@ class ChangeMonitorResult(BaseModel):
     current_holder: Optional[str]      = None
     current_rir: Optional[str]         = None
     message: str                       = ""
+
+
+# ──────────────────────────────────────────────────────────────
+# Input Models — Sprint 2 DNS
+# ──────────────────────────────────────────────────────────────
+
+class DNSResolveInput(BaseModel):
+    """Input for forward/reverse DNS resolution."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    target: str = Field(
+        ...,
+        description="IPv4/IPv6 address (reverse PTR lookup) or domain name (forward A/AAAA lookup)",
+        min_length=2, max_length=253,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DNSEnumerateInput(BaseModel):
+    """Input for full DNS record enumeration."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain: str = Field(
+        ...,
+        description="Domain name to enumerate all DNS records for (e.g. 'cloudflare.com')",
+        min_length=3, max_length=253,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DNSSECInput(BaseModel):
+    """Input for DNSSEC chain validation."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain: str = Field(
+        ...,
+        description="Domain name to validate DNSSEC chain for (e.g. 'cloudflare.com')",
+        min_length=3, max_length=253,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DNSBLInput(BaseModel):
+    """Input for DNS blocklist (DNSBL) check."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    ip: str = Field(
+        ...,
+        description="IPv4 address to check against DNS blocklists (e.g. '1.2.3.4')",
+        min_length=7, max_length=15,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class EmailSecurityInput(BaseModel):
+    """Input for email security record analysis."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain: str = Field(
+        ...,
+        description="Domain name to audit for SPF, DMARC, DKIM, MX records (e.g. 'gmail.com')",
+        min_length=3, max_length=253,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DNSPropagationInput(BaseModel):
+    """Input for DNS propagation check across global resolvers."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain: str = Field(
+        ...,
+        description="Domain name to check propagation for (e.g. 'example.com')",
+        min_length=3, max_length=253,
+    )
+    record_type: str = Field(
+        default="A",
+        description="DNS record type to check: A, AAAA, MX, NS, TXT, CNAME",
+        pattern="^(A|AAAA|MX|NS|TXT|CNAME|SOA)$",
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+# ──────────────────────────────────────────────────────────────
+# Output Models — Sprint 2 DNS
+# ──────────────────────────────────────────────────────────────
+
+class DNSResolveResult(BaseModel):
+    """Result of a forward or reverse DNS resolution."""
+    target: str
+    is_ip: bool                              = False   # True = reverse lookup, False = forward
+    ptr_records: List[str]                   = Field(default_factory=list)
+    a_records: List[str]                     = Field(default_factory=list)
+    aaaa_records: List[str]                  = Field(default_factory=list)
+    rdap_org: Optional[str]                  = None    # RDAP owner of the IP (correlation)
+    rdap_mismatch: bool                      = False   # PTR hostname vs RDAP owner mismatch flag
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class DNSRecord(BaseModel):
+    """A single DNS resource record."""
+    rtype: str
+    value: str
+    ttl: Optional[int] = None
+
+
+class DNSEnumerateResult(BaseModel):
+    """Full DNS record set for a domain."""
+    domain: str
+    records: dict[str, List[DNSRecord]]      = Field(default_factory=dict)
+    spf_value: Optional[str]                 = None
+    dmarc_value: Optional[str]               = None
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class DNSSECResult(BaseModel):
+    """DNSSEC chain-of-trust validation result."""
+    domain: str
+    status: str                              = "INDETERMINATE"  # SECURE|INSECURE|BOGUS|INDETERMINATE
+    has_dnskey: bool                         = False
+    has_rrsig: bool                          = False
+    has_ds: bool                             = False
+    signature_expiry: Optional[str]          = None
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class DNSBLEntry(BaseModel):
+    """Result of checking an IP against a single DNS blocklist."""
+    list_name: str
+    list_description: str                    = ""
+    listed: bool                             = False
+    return_code: Optional[str]               = None
+    description: Optional[str]              = None
+
+
+class DNSBLResult(BaseModel):
+    """Aggregated result of checking an IP against all DNS blocklists."""
+    ip: str
+    listed_count: int                        = 0
+    checked_count: int                       = 0
+    entries: List[DNSBLEntry]                = Field(default_factory=list)
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class EmailSecurityResult(BaseModel):
+    """Email security posture for a domain: SPF, DMARC, DKIM, MX."""
+    domain: str
+    spf_valid: bool                          = False
+    spf_record: Optional[str]               = None
+    spf_all_mechanism: Optional[str]        = None   # +all | -all | ~all | ?all
+    dmarc_present: bool                      = False
+    dmarc_policy: Optional[str]             = None   # none | quarantine | reject
+    dmarc_rua: Optional[str]                = None   # aggregate report URI
+    dmarc_ruf: Optional[str]                = None   # forensic report URI
+    dkim_selectors_found: List[str]          = Field(default_factory=list)
+    mx_records: List[str]                    = Field(default_factory=list)
+    bimi_present: bool                       = False
+    risk_level: str                          = "UNKNOWN"  # LOW|MEDIUM|HIGH|CRITICAL
+    recommendations: List[str]               = Field(default_factory=list)
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class PropagationEntry(BaseModel):
+    """DNS resolution result from a single resolver."""
+    resolver_ip: str
+    resolver_name: str
+    region: str
+    response: List[str]                      = Field(default_factory=list)
+    matches_majority: bool                   = False
+    error: Optional[str]                     = None
+
+
+class DNSPropagationResult(BaseModel):
+    """DNS propagation check across 10 global resolvers."""
+    domain: str
+    record_type: str
+    majority_answer: List[str]               = Field(default_factory=list)
+    consistent: bool                         = False
+    propagated_count: int                    = 0
+    total_resolvers: int                     = 0
+    entries: List[PropagationEntry]          = Field(default_factory=list)
+    errors: List[str]                        = Field(default_factory=list)

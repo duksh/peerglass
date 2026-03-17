@@ -27,6 +27,12 @@ from models import (
     IXPLookupResult,
     NetworkHealthResult,
     ChangeMonitorResult,
+    DNSResolveResult,
+    DNSEnumerateResult,
+    DNSSECResult,
+    DNSBLResult,
+    EmailSecurityResult,
+    DNSPropagationResult,
 )
 
 
@@ -1004,6 +1010,221 @@ def format_change_monitor_md(result: ChangeMonitorResult) -> str:
         lines.append(
             "> ✅ **No changes detected.** Registration and BGP state are identical "
             "to the stored baseline.\n\n"
+        )
+
+    return "".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# DNS Formatters (Sprint 2 — E1–E5, E7)
+# ---------------------------------------------------------------------------
+
+def format_dns_resolve_md(result: DNSResolveResult) -> str:
+    """Render DNS resolve/PTR result as Markdown."""
+    lines: list[str] = []
+    lines.append(f"## DNS Resolution: `{result.query}`\n\n")
+    lines.append(f"- **Type:** {result.query_type}\n")
+    lines.append(f"- **Resolver:** {result.resolver}\n")
+    lines.append(f"- **Records found:** {len(result.records)}\n\n")
+
+    if result.records:
+        lines.append("### Records\n\n")
+        lines.append("| Type | TTL | Value |\n")
+        lines.append("|------|-----|-------|\n")
+        for rec in result.records:
+            lines.append(f"| {rec.record_type} | {rec.ttl}s | `{rec.value}` |\n")
+        lines.append("\n")
+
+    if result.rdap_correlation:
+        c = result.rdap_correlation
+        lines.append("### RDAP Correlation\n\n")
+        if c.get("holder"):
+            lines.append(f"- **Holder:** {c['holder']}\n")
+        if c.get("country"):
+            lines.append(f"- **Country:** {c['country']}\n")
+        if c.get("rir"):
+            lines.append(f"- **RIR:** {c['rir']}\n")
+        if c.get("prefix"):
+            lines.append(f"- **Covering prefix:** `{c['prefix']}`\n")
+        lines.append("\n")
+
+    if result.error:
+        lines.append(f"> ⚠️ **Error:** {result.error}\n\n")
+
+    return "".join(lines)
+
+
+def format_dns_enumerate_md(result: DNSEnumerateResult) -> str:
+    """Render full DNS record enumeration as Markdown."""
+    lines: list[str] = []
+    lines.append(f"## DNS Enumeration: `{result.domain}`\n\n")
+
+    all_records = [r for rtype_records in result.records.values() for r in rtype_records]
+    lines.append(f"- **Total records:** {len(all_records)}\n")
+    lines.append(f"- **Record types found:** {', '.join(sorted(result.records.keys())) or 'none'}\n\n")
+
+    for rtype in sorted(result.records.keys()):
+        recs = result.records[rtype]
+        lines.append(f"### {rtype} Records\n\n")
+        lines.append("| TTL | Value |\n")
+        lines.append("|-----|-------|\n")
+        for rec in recs:
+            lines.append(f"| {rec.ttl}s | `{rec.value}` |\n")
+        lines.append("\n")
+
+    if result.spf:
+        lines.append(f"### SPF Policy\n\n```\n{result.spf}\n```\n\n")
+    if result.dmarc:
+        lines.append(f"### DMARC Policy\n\n```\n{result.dmarc}\n```\n\n")
+
+    return "".join(lines)
+
+
+def format_dns_dnssec_md(result: DNSSECResult) -> str:
+    """Render DNSSEC validation result as Markdown."""
+    ICONS = {
+        "SECURE": "✅",
+        "INSECURE": "❌",
+        "BOGUS": "🚨",
+        "INDETERMINATE": "❓",
+    }
+    icon = ICONS.get(result.status, "❓")
+    lines: list[str] = []
+    lines.append(f"## DNSSEC Status: `{result.domain}`\n\n")
+    lines.append(f"- **Status:** {icon} **{result.status}**\n")
+    lines.append(f"- **Chain valid:** {'Yes' if result.chain_valid else 'No'}\n")
+    lines.append(f"- **DNSKEY records:** {result.dnskey_count}\n")
+    lines.append(f"- **DS records:** {result.ds_count}\n")
+    lines.append(f"- **RRSIG records:** {result.rrsig_count}\n\n")
+
+    if result.algorithms:
+        lines.append(f"- **Signing algorithms:** {', '.join(result.algorithms)}\n\n")
+
+    if result.errors:
+        lines.append("### Validation Errors\n\n")
+        for err in result.errors:
+            lines.append(f"- {err}\n")
+        lines.append("\n")
+
+    STATUS_NOTES = {
+        "SECURE": "> ✅ DNSSEC chain validates correctly to a trusted root anchor.\n\n",
+        "INSECURE": "> ❌ Domain does not have DNSSEC configured.\n\n",
+        "BOGUS": "> 🚨 **DNSSEC validation FAILED** — signatures are invalid or chain is broken. This may indicate tampering or misconfiguration.\n\n",
+        "INDETERMINATE": "> ❓ DNSSEC status could not be determined (delegation missing or resolver error).\n\n",
+    }
+    lines.append(STATUS_NOTES.get(result.status, ""))
+    return "".join(lines)
+
+
+def format_dns_dnsbl_md(result: DNSBLResult) -> str:
+    """Render DNSBL/blocklist lookup result as Markdown."""
+    lines: list[str] = []
+    listed_count = sum(1 for e in result.entries if e.listed)
+    status_icon = "🚨" if listed_count > 0 else "✅"
+    lines.append(f"## DNSBL Lookup: `{result.ip}`\n\n")
+    lines.append(f"- **Status:** {status_icon} **{'LISTED on ' + str(listed_count) + ' list(s)' if listed_count else 'CLEAN'}**\n")
+    lines.append(f"- **Lists checked:** {result.lists_checked}\n")
+    lines.append(f"- **Listed:** {listed_count}\n")
+    lines.append(f"- **Clean:** {result.lists_checked - listed_count}\n\n")
+
+    if listed_count:
+        lines.append("### Listed On\n\n")
+        lines.append("| List | Return Code | Description |\n")
+        lines.append("|------|-------------|-------------|\n")
+        for entry in result.entries:
+            if entry.listed:
+                lines.append(
+                    f"| `{entry.list_name}` | `{entry.return_code or 'N/A'}` | {entry.description or ''} |\n"
+                )
+        lines.append("\n")
+        lines.append("> ⚠️ Being listed may affect email deliverability and connectivity. "
+                     "Contact each list's removal process to delist.\n\n")
+
+    return "".join(lines)
+
+
+def format_email_security_md(result: EmailSecurityResult) -> str:
+    """Render email security (SPF/DMARC/DKIM) result as Markdown."""
+    lines: list[str] = []
+    risk_icons = {"LOW": "✅", "MEDIUM": "⚠️", "HIGH": "🚨", "CRITICAL": "🔴"}
+    risk_icon = risk_icons.get(result.risk_level, "❓")
+
+    lines.append(f"## Email Security: `{result.domain}`\n\n")
+    lines.append(f"- **Overall Risk:** {risk_icon} **{result.risk_level}**\n")
+    lines.append(f"- **Score:** {result.score}/100\n\n")
+
+    lines.append("### SPF\n\n")
+    lines.append(f"- **Present:** {'Yes' if result.spf_present else 'No'}\n")
+    if result.spf_record:
+        lines.append(f"- **Record:** `{result.spf_record}`\n")
+    lines.append(f"- **Valid:** {'Yes' if result.spf_valid else 'No'}\n")
+    if result.spf_policy:
+        lines.append(f"- **Policy:** `{result.spf_policy}`\n")
+    lines.append("\n")
+
+    lines.append("### DMARC\n\n")
+    lines.append(f"- **Present:** {'Yes' if result.dmarc_present else 'No'}\n")
+    if result.dmarc_record:
+        lines.append(f"- **Record:** `{result.dmarc_record}`\n")
+    lines.append(f"- **Valid:** {'Yes' if result.dmarc_valid else 'No'}\n")
+    if result.dmarc_policy:
+        lines.append(f"- **Policy:** `{result.dmarc_policy}` (p=)\n")
+    if result.dmarc_pct is not None:
+        lines.append(f"- **Coverage:** {result.dmarc_pct}%\n")
+    lines.append("\n")
+
+    if result.dkim_selectors_found:
+        lines.append("### DKIM\n\n")
+        lines.append(f"- **Selectors found:** {', '.join(f'`{s}`' for s in result.dkim_selectors_found)}\n\n")
+
+    if result.mx_records:
+        lines.append("### MX Records\n\n")
+        for mx in result.mx_records:
+            lines.append(f"- `{mx}`\n")
+        lines.append("\n")
+
+    if result.bimi_present:
+        lines.append("### BIMI\n\n")
+        lines.append(f"- **Present:** Yes\n")
+        if result.bimi_record:
+            lines.append(f"- **Record:** `{result.bimi_record}`\n")
+        lines.append("\n")
+
+    if result.issues:
+        lines.append("### Issues Found\n\n")
+        for issue in result.issues:
+            lines.append(f"- {issue}\n")
+        lines.append("\n")
+
+    return "".join(lines)
+
+
+def format_dns_propagation_md(result: DNSPropagationResult) -> str:
+    """Render DNS propagation check result as Markdown."""
+    lines: list[str] = []
+    propagated_count = sum(1 for e in result.results if e.matches_majority)
+    total = len(result.results)
+
+    lines.append(f"## DNS Propagation: `{result.domain}` ({result.record_type})\n\n")
+    lines.append(f"- **Propagated:** {propagated_count}/{total} resolvers\n")
+    lines.append(f"- **Majority answer:** {', '.join(f'`{v}`' for v in result.majority_answer) if result.majority_answer else 'N/A'}\n")
+    lines.append(f"- **Fully propagated:** {'Yes ✅' if result.propagation_complete else 'No ⏳'}\n\n")
+
+    lines.append("### Resolver Results\n\n")
+    lines.append("| Resolver | Location | Answer | Status |\n")
+    lines.append("|----------|----------|--------|--------|\n")
+    for entry in result.results:
+        status = "✅" if entry.matches_majority else ("⚠️" if entry.answers else "❌")
+        answers = ", ".join(f"`{a}`" for a in entry.answers) if entry.answers else f"*{entry.error or 'timeout'}*"
+        lines.append(
+            f"| {entry.resolver_name} ({entry.resolver_ip}) | {entry.location} | {answers} | {status} |\n"
+        )
+    lines.append("\n")
+
+    if not result.propagation_complete:
+        lines.append(
+            "> ⏳ DNS changes may take 24–48 hours to fully propagate globally. "
+            "TTL values on the old records control how long resolvers cache stale data.\n\n"
         )
 
     return "".join(lines)
