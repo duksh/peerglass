@@ -563,18 +563,18 @@ async def test_dns_resolve():
     print("  Expect: A records with 1.1.1.x IPs, RDAP holder = APNIC/Cloudflare")
     try:
         from models import DNSResolveInput
-        inp = DNSResolveInput(target="cloudflare.com", record_type="A")
+        inp = DNSResolveInput(target="cloudflare.com")
         result = await rir_client.dns_resolve(inp)
 
-        if result.error:
-            fail("DNS resolve cloudflare.com", result.error); return
+        if result.errors:
+            fail("DNS resolve cloudflare.com", result.errors[0]); return
 
-        ok("Records returned", f"{len(result.records)} A record(s)") if result.records else fail("Records returned", "empty")
-        ips = [r.value for r in result.records]
+        ips = result.a_records
+        ok("Records returned", f"{len(ips)} A record(s)") if ips else fail("Records returned", "empty")
         has_cloudflare_ip = any(ip.startswith("1.1.1.") or ip.startswith("104.") for ip in ips)
         ok("Cloudflare IP returned", f"IPs: {ips[:3]}") if has_cloudflare_ip else ok("A records returned", f"IPs: {ips[:3]}")
-        if result.rdap_correlation:
-            ok("RDAP correlation present", f"holder={result.rdap_correlation.get('holder','?')}")
+        if result.rdap_org:
+            ok("RDAP correlation present", f"org={result.rdap_org}")
         else:
             skip("RDAP correlation", "No correlation (may be normal if RDAP lookup skipped)")
     except Exception:
@@ -611,7 +611,7 @@ async def test_dns_dnssec():
         inp = DNSSECInput(domain="cloudflare.com")
         result = await rir_client.dns_dnssec(inp)
 
-        ok(f"DNSSEC status: {result.status}", f"chain_valid={result.chain_valid}, dnskey_count={result.dnskey_count}")
+        ok(f"DNSSEC status: {result.status}", f"has_dnskey={result.has_dnskey}, has_rrsig={result.has_rrsig}, has_ds={result.has_ds}")
         if result.status == "SECURE":
             ok("DNSSEC chain is SECURE")
         elif result.status == "INSECURE":
@@ -634,7 +634,7 @@ async def test_dns_dnsbl():
         result = await rir_client.dns_dnsbl(inp)
 
         listed = [e for e in result.entries if e.listed]
-        ok(f"Checked {result.lists_checked} blocklists", f"{len(listed)} listed")
+        ok(f"Checked {result.checked_count} blocklists", f"{len(listed)} listed")
         if len(listed) == 0:
             ok("1.1.1.1 is CLEAN across all lists")
         elif len(listed) <= 2:
@@ -654,14 +654,14 @@ async def test_dns_email_security():
         inp = EmailSecurityInput(domain="cloudflare.com")
         result = await rir_client.dns_email_security(inp)
 
-        ok("SPF present", result.spf_record[:80] if result.spf_record else "—") if result.spf_present else fail("SPF present", "Missing SPF record")
-        ok("DMARC present", result.dmarc_record[:80] if result.dmarc_record else "—") if result.dmarc_present else fail("DMARC present", "Missing DMARC record")
+        ok("SPF present", result.spf_record[:80] if result.spf_record else "—") if result.spf_valid else fail("SPF present", "Missing SPF record")
+        ok("DMARC present", f"policy={result.dmarc_policy}") if result.dmarc_present else fail("DMARC present", "Missing DMARC record")
         if result.dmarc_policy in ("reject", "quarantine"):
             ok(f"DMARC policy is strong", f"p={result.dmarc_policy}")
         else:
             skip("DMARC policy strength", f"p={result.dmarc_policy}")
         ok(f"MX records found", f"{len(result.mx_records)} MX record(s)") if result.mx_records else skip("MX records", "No MX (may query subdomains)")
-        ok(f"Risk level assessed", f"{result.risk_level} (score={result.score})")
+        ok(f"Risk level assessed", f"{result.risk_level}")
     except Exception:
         fail("Email security", traceback.format_exc()[-120:])
 
@@ -675,10 +675,10 @@ async def test_dns_propagation():
         inp = DNSPropagationInput(domain="cloudflare.com", record_type="A")
         result = await rir_client.dns_propagation(inp)
 
-        ok(f"Queried {len(result.results)} resolvers", f"majority_answer={result.majority_answer[:2] if result.majority_answer else '?'}")
-        answered = [e for e in result.results if e.answers]
-        ok(f"Resolvers answered", f"{len(answered)}/{len(result.results)} returned records") if answered else fail("Resolvers answered", "None returned records")
-        if result.propagation_complete:
+        ok(f"Queried {len(result.entries)} resolvers", f"majority_answer={result.majority_answer[:2] if result.majority_answer else '?'}")
+        answered = [e for e in result.entries if e.response]
+        ok(f"Resolvers answered", f"{len(answered)}/{len(result.entries)} returned records") if answered else fail("Resolvers answered", "None returned records")
+        if result.consistent:
             ok("Propagation complete (majority agree)")
         else:
             skip("Propagation complete", "Some resolvers diverging — transient or expected")
