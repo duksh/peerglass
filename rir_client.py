@@ -2826,6 +2826,9 @@ async def passive_dns(inp: PassiveDNSInput) -> PassiveDNSResult:
                 params=params,
                 headers={"User-Agent": _USER_AGENT},
             )
+            if r.status_code == 404:
+                # RIPE PDNS returns 404 when no records exist for a resource
+                return PassiveDNSResult(resource=inp.resource, total=0, records=[])
             if r.status_code != 200:
                 return PassiveDNSResult(
                     resource=inp.resource,
