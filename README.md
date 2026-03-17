@@ -119,9 +119,26 @@ Interactive docs at: http://localhost:8000/docs
 "Monitor AS13335 for changes since last baseline."
 ```
 
+**Phase 5 — DNS intelligence:**
+```
+"What DNS records does cloudflare.com have?"
+"Is the DNSSEC chain valid for google.com?"
+"Check if 1.2.3.4 is on any spam blocklist."
+"Audit the email security posture of example.com."
+"Has my DNS change for api.example.com propagated globally yet?"
+```
+
+**Phase 6 — TLS, certificates & threat intel:**
+```
+"When does the TLS certificate for cloudflare.com expire?"
+"Show me all certificates ever issued for *.example.com."
+"Is 198.51.100.1 flagged as malicious — what ports and CVEs does Shodan see?"
+"What hostnames has the IP 1.2.3.4 served historically?"
+```
+
 ---
 
-## All 17 MCP Tools
+## All 27 MCP Tools
 
 ### Phase 1 — Registry Queries
 
@@ -155,17 +172,39 @@ Interactive docs at: http://localhost:8000/docs
 
 | Tool | Description | Cache TTL |
 |------|-------------|-----------|
-| `rir_get_peering_info` | PeeringDB peering data + BGP neighbours for an ASN | 1 hour |
-| `rir_lookup_ixps` | Search Internet Exchange Points globally | 6 hours |
+| `rir_peering_info` | PeeringDB peering data + BGP neighbours for an ASN | 1 hour |
+| `rir_ixp_lookup` | Search Internet Exchange Points globally | 6 hours |
 | `rir_network_health` | RPKI + BGP + RDAP health composite check | 5 min |
 | `rir_change_monitor` | Detect changes since last baseline (delta report) | live |
 
+### Phase 5 — DNS Intelligence
+
+| Tool | Description | Cache TTL |
+|------|-------------|-----------|
+| `peerglass_dns_resolve` | DNS resolution with RDAP IP correlation (A/AAAA/PTR/MX/TXT/NS…) | 5 min |
+| `peerglass_dns_enumerate` | Full DNS record enumeration — all types in one call + SPF/DMARC extraction | 5 min |
+| `peerglass_dns_dnssec` | DNSSEC chain-of-trust validation (SECURE / INSECURE / BOGUS / INDETERMINATE) | 5 min |
+| `peerglass_dns_dnsbl` | DNS blocklist check against 30 RBLs in parallel (Spamhaus, Barracuda, SORBS…) | 15 min |
+| `peerglass_dns_email_security` | Email security audit: SPF, DMARC, DKIM, MX, BIMI + risk score | 15 min |
+| `peerglass_dns_propagation` | DNS propagation check across 10 global resolvers simultaneously | live |
+
+### Phase 6 — TLS, Certificates & Threat Intelligence
+
+| Tool | Description | Cache TTL |
+|------|-------------|-----------|
+| `peerglass_tls_inspect` | TLS certificate inspection: subject, SANs, expiry, cipher suite, HSTS | 1 hour |
+| `peerglass_ct_logs` | Certificate Transparency log search via crt.sh — discover all certs ever issued | 6 hours |
+| `peerglass_threat_intel` | Threat intelligence: Shodan InternetDB (open ports, CVEs) + GreyNoise (classification, risk score) | 15 min |
+| `peerglass_passive_dns` | Passive DNS history via RIPE Stat — what IPs/hostnames were associated over time | 12 hours |
+
 ---
 
-## REST API — 15 Endpoints
+## REST API — 25 Endpoints
 
 PeerGlass exposes every tool as a REST endpoint, allowing integration with
 dashboards, scripts, and CI/CD pipelines — no Claude required.
+
+**Registry & Routing**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -185,6 +224,26 @@ dashboards, scripts, and CI/CD pipelines — no Claude required.
 | GET | `/v1/health/{resource}` | Composite network health check |
 | GET | `/v1/monitor/{resource}` | Change monitoring (delta) |
 
+**DNS Intelligence**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/dns/resolve/{target}` | DNS resolution + RDAP IP correlation |
+| GET | `/v1/dns/enumerate/{domain}` | Full DNS record enumeration (all types) |
+| GET | `/v1/dns/dnssec/{domain}` | DNSSEC chain-of-trust validation |
+| GET | `/v1/dns/dnsbl/{ip}` | DNS blocklist check (30 RBLs in parallel) |
+| GET | `/v1/dns/email/{domain}` | Email security audit (SPF/DMARC/DKIM/BIMI) |
+| GET | `/v1/dns/propagation/{domain}` | DNS propagation across 10 global resolvers |
+
+**TLS, Certificates & Threat Intel**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/tls/{hostname}` | TLS certificate inspection |
+| GET | `/v1/ct/{domain}` | Certificate Transparency log search |
+| GET | `/v1/threat/{ip}` | Threat intelligence (Shodan + GreyNoise) |
+| GET | `/v1/pdns/{resource}` | Passive DNS history (RIPE Stat) |
+
 **Quick example:**
 
 ```bash
@@ -199,6 +258,30 @@ curl http://localhost:8000/v1/peering/AS15169
 
 # List AFRINIC delegated IPv4 blocks (allocated + Ghana), paginated
 curl "http://localhost:8000/v1/stats/ipv4?rir=AFRINIC&include_blocks=true&status=allocated&country=GH&limit=5&offset=0&format=json"
+
+# DNS — enumerate all record types for a domain
+curl http://localhost:8000/v1/dns/enumerate/cloudflare.com
+
+# DNS — check email security (SPF/DMARC/DKIM)
+curl http://localhost:8000/v1/dns/email/cloudflare.com
+
+# DNS — check if an IP is on any blocklist
+curl http://localhost:8000/v1/dns/dnsbl/1.2.3.4
+
+# DNS — check propagation across 10 global resolvers
+curl "http://localhost:8000/v1/dns/propagation/cloudflare.com?record_type=A"
+
+# TLS — inspect certificate for a hostname
+curl http://localhost:8000/v1/tls/cloudflare.com
+
+# Certificates — find all certs ever issued for a domain
+curl http://localhost:8000/v1/ct/cloudflare.com
+
+# Threat intel — open ports, CVEs, risk score for an IP
+curl http://localhost:8000/v1/threat/1.2.3.4
+
+# Passive DNS — what hostnames has this IP served?
+curl http://localhost:8000/v1/pdns/1.1.1.1
 ```
 
 Interactive docs (Swagger UI): http://localhost:8000/docs
@@ -292,7 +375,7 @@ You should run both — they catch different categories of problems.
 | 5 | User-Agent | Updated to `peerglass/1.0.0` |
 | 6 | MCP server name | `"peerglass"` |
 | 7 | Tool count | Exactly 17 `@mcp.tool()` decorators in `server.py` |
-| 8 | REST endpoints | All 15 routes present in `api.py` |
+| 8 | REST endpoints | All 25 routes present in `api.py` |
 | 9 | FastAPI runtime | TestClient hits 3 endpoints in-memory, validates responses |
 | 10 | README | PeerGlass branding, 27 tools, RDAP note all present |
 
@@ -319,7 +402,7 @@ PEERGLASS — COMPLETE TEST SUITE
 ...
 
 ✅ ALL TESTS PASSED — 0 errors
-  Python files: 7  |  MCP tools: 17  |  REST endpoints: 15
+  Python files: 7  |  MCP tools: 27  |  REST endpoints: 25
   Protocol: RDAP throughout (RFC 7480-7484)
   Branding: PeerGlass throughout
 ============================================================
