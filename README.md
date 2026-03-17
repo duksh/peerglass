@@ -138,7 +138,7 @@ Interactive docs at: http://localhost:8000/docs
 
 ---
 
-## All 39 MCP Tools
+## All 42 MCP Tools
 
 ### Phase 1 — Registry Queries
 
@@ -197,9 +197,39 @@ Interactive docs at: http://localhost:8000/docs
 | `peerglass_threat_intel` | Threat intelligence: Shodan InternetDB (open ports, CVEs) + GreyNoise (classification, risk score) | 15 min |
 | `peerglass_passive_dns` | Passive DNS history via RIPE Stat — what IPs/hostnames were associated over time | 12 hours |
 
+### Phase 7 — BGP Depth
+
+| Tool | Description | Cache TTL |
+|------|-------------|-----------|
+| `rir_check_irr` | IRR route object validation via IRRExplorer — checks RIPE/RADB/ARIN/APNIC/LACNIC consistency | 1 hour |
+| `rir_detect_route_leak` | BGP route leak detection — identifies valley-free violations and multi-origin anomalies | 5 min |
+| `rir_looking_glass` | BGP looking glass via RIPE RIS — real AS paths from global vantage points | 5 min |
+| `rir_route_stability` | Route flap and stability analysis — state changes, uptime %, stability score | 15 min |
+
+### Phase 8 — Humanitarian & Crisis Intelligence
+
+| Tool | Description | Cache TTL |
+|------|-------------|-----------|
+| `peerglass_shutdown_detect` | Country BGP shutdown detection — compares current prefix counts vs baseline | 5 min |
+| `peerglass_monitor_register` | Register webhook alerts for shutdown/change events | live |
+| `peerglass_shutdown_timeline` | Historical BGP shutdown timeline with SHA-256 integrity hash (for UN reports) | 1 hour |
+| `peerglass_dns_censorship` | DNS censorship fingerprinting — detects NXDOMAIN injection, IP poisoning, DPI blocking | 10 min |
+| `peerglass_satellite_connectivity` | Satellite internet tracking — Starlink, Viasat, OneWeb BGP presence | 15 min |
+| `peerglass_country_chokepoints` | Country internet chokepoint mapping — critical transit providers, resilience score | 6 hours |
+| `peerglass_ooni_report` | OONI censorship measurements — blocked domains, Tor accessibility, circumvention tools | 30 min |
+| `peerglass_country_health` | Composite country internet health dashboard — 0–100 score from BGP + DNS + OONI + satellite | 5 min |
+
+### Phase 9 — Advanced Platform
+
+| Tool | Description | Cache TTL |
+|------|-------------|-----------|
+| `rir_as_relationships` | AS relationship classification (provider/customer/peer) via CAIDA AS-Rank API | 7 days |
+| `peerglass_geo_lookup` | GeoIP enrichment via MaxMind GeoLite2-City (requires `PEERGLASS_GEOIP_DB` env var) | 24 hours |
+| `peerglass_atlas_trace` | RIPE Atlas distributed traceroute from global vantage points (requires `PEERGLASS_RIPE_ATLAS_KEY`) | 5 min |
+
 ---
 
-## REST API — 25 Endpoints
+## REST API — 41 Endpoints
 
 PeerGlass exposes every tool as a REST endpoint, allowing integration with
 dashboards, scripts, and CI/CD pipelines — no Claude required.
@@ -243,6 +273,37 @@ dashboards, scripts, and CI/CD pipelines — no Claude required.
 | GET | `/v1/ct/{domain}` | Certificate Transparency log search |
 | GET | `/v1/threat/{ip}` | Threat intelligence (Shodan + GreyNoise) |
 | GET | `/v1/pdns/{resource}` | Passive DNS history (RIPE Stat) |
+
+**BGP Depth**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/irr?prefix=...&asn=...` | IRR route object validation |
+| GET | `/v1/route-leak/{prefix}` | BGP route leak detection |
+| GET | `/v1/looking-glass/{prefix}` | BGP looking glass (RIPE RIS) |
+| GET | `/v1/stability/{prefix}` | Route flap stability analysis |
+
+**Humanitarian & Crisis**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/shutdown/{country_code}` | Country BGP shutdown detection |
+| POST | `/v1/shutdown/monitor` | Register shutdown webhook alert |
+| GET | `/v1/shutdown/timeline/{resource}` | Historical shutdown timeline |
+| GET | `/v1/censorship/{domain}` | DNS censorship fingerprinting |
+| GET | `/v1/satellite/{country_code}` | Satellite connectivity status |
+| GET | `/v1/chokepoints/{country_code}` | Country internet chokepoints |
+| GET | `/v1/ooni/{country_code}` | OONI censorship measurements |
+| GET | `/v1/health/country/{country_code}` | Composite country internet health |
+
+**Advanced Platform**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/as-relationships/{asn}` | AS relationship classification (CAIDA) |
+| GET | `/v1/geo/{ip}` | GeoIP enrichment (MaxMind GeoLite2) |
+| GET | `/v1/atlas/{target}` | RIPE Atlas distributed traceroute |
+| POST | `/v1/bulk` | Bulk query up to 50 resources in one call |
 
 **Quick example:**
 
@@ -297,7 +358,7 @@ Interactive docs (Swagger UI): http://localhost:8000/docs
 │   Claude (LLM)              REST Clients                │
 │       │ MCP / stdio              │ HTTP                 │
 │       ▼                          ▼                      │
-│   server.py (42 tools)      api.py (25 endpoints)       │
+│   server.py (42 tools)      api.py (41 endpoints)       │
 │       │                          │                      │
 │       └──────────┬───────────────┘                      │
 │                  ▼                                       │
@@ -374,8 +435,8 @@ You should run both — they catch different categories of problems.
 | 4 | Protocol header | `Accept: application/rdap+json` is set |
 | 5 | User-Agent | Updated to `peerglass/1.0.0` |
 | 6 | MCP server name | `"peerglass"` |
-| 7 | Tool count | Exactly 27 `@mcp.tool()` decorators in `server.py` |
-| 8 | REST endpoints | All 25 routes present in `api.py` |
+| 7 | Tool count | Exactly 42 `@mcp.tool()` decorators in `server.py` |
+| 8 | REST endpoints | All 41 routes present in `api.py` |
 | 9 | FastAPI runtime | TestClient hits 3 endpoints in-memory, validates responses |
 | 10 | README | PeerGlass branding, 42 tools, RDAP note all present |
 
