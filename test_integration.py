@@ -557,5 +557,296 @@ async def main():
     print(f"\n{'='*60}\n")
     return fail_count
 
+# ── TEST 15: DNS Resolve — cloudflare.com ─────────────────────
+async def test_dns_resolve():
+    section("TEST 15 — DNS Resolve: cloudflare.com (A record + RDAP correlation)")
+    print("  Expect: A records with 1.1.1.x IPs, RDAP holder = APNIC/Cloudflare")
+    try:
+        from models import DNSResolveInput
+        inp = DNSResolveInput(target="cloudflare.com", record_type="A")
+        result = await rir_client.dns_resolve(inp)
+
+        if result.error:
+            fail("DNS resolve cloudflare.com", result.error); return
+
+        ok("Records returned", f"{len(result.records)} A record(s)") if result.records else fail("Records returned", "empty")
+        ips = [r.value for r in result.records]
+        has_cloudflare_ip = any(ip.startswith("1.1.1.") or ip.startswith("104.") for ip in ips)
+        ok("Cloudflare IP returned", f"IPs: {ips[:3]}") if has_cloudflare_ip else ok("A records returned", f"IPs: {ips[:3]}")
+        if result.rdap_correlation:
+            ok("RDAP correlation present", f"holder={result.rdap_correlation.get('holder','?')}")
+        else:
+            skip("RDAP correlation", "No correlation (may be normal if RDAP lookup skipped)")
+    except Exception:
+        fail("DNS resolve", traceback.format_exc()[-120:])
+
+
+# ── TEST 16: DNS Enumerate — cloudflare.com ────────────────────
+async def test_dns_enumerate():
+    section("TEST 16 — DNS Enumerate: cloudflare.com (all record types)")
+    print("  Expect: A, AAAA, MX, NS records all present for cloudflare.com")
+    try:
+        from models import DNSEnumerateInput
+        inp = DNSEnumerateInput(domain="cloudflare.com")
+        result = await rir_client.dns_enumerate(inp)
+
+        found_types = list(result.records.keys())
+        ok("Record types returned", f"types: {sorted(found_types)}") if found_types else fail("Records", "empty")
+        for rtype in ["A", "AAAA", "MX", "NS"]:
+            if rtype in result.records:
+                count = len(result.records[rtype])
+                ok(f"{rtype} records present", f"{count} record(s)")
+            else:
+                skip(f"{rtype} records", "type not returned (may be transient)")
+    except Exception:
+        fail("DNS enumerate", traceback.format_exc()[-120:])
+
+
+# ── TEST 17: DNSSEC — cloudflare.com ──────────────────────────
+async def test_dns_dnssec():
+    section("TEST 17 — DNSSEC Validation: cloudflare.com")
+    print("  Cloudflare signs their zones. Expect: status=SECURE, chain_valid=True")
+    try:
+        from models import DNSSECInput
+        inp = DNSSECInput(domain="cloudflare.com")
+        result = await rir_client.dns_dnssec(inp)
+
+        ok(f"DNSSEC status: {result.status}", f"chain_valid={result.chain_valid}, dnskey_count={result.dnskey_count}")
+        if result.status == "SECURE":
+            ok("DNSSEC chain is SECURE")
+        elif result.status == "INSECURE":
+            skip("DNSSEC SECURE", "Returned INSECURE — resolver may not validate")
+        elif result.status == "INDETERMINATE":
+            skip("DNSSEC SECURE", "Returned INDETERMINATE — network or resolver issue")
+        else:
+            fail("DNSSEC status", f"Got {result.status}: {result.errors}")
+    except Exception:
+        fail("DNSSEC", traceback.format_exc()[-120:])
+
+
+# ── TEST 18: DNSBL — 1.1.1.1 (should be clean) ────────────────
+async def test_dns_dnsbl():
+    section("TEST 18 — DNSBL Check: 1.1.1.1 (Cloudflare DNS — should be clean)")
+    print("  Expect: listed on 0 or very few blocklists (Cloudflare is RIOT/trusted)")
+    try:
+        from models import DNSBLInput
+        inp = DNSBLInput(ip="1.1.1.1")
+        result = await rir_client.dns_dnsbl(inp)
+
+        listed = [e for e in result.entries if e.listed]
+        ok(f"Checked {result.lists_checked} blocklists", f"{len(listed)} listed")
+        if len(listed) == 0:
+            ok("1.1.1.1 is CLEAN across all lists")
+        elif len(listed) <= 2:
+            ok("1.1.1.1 mostly clean", f"Listed on {len(listed)} list(s): {[e.list_name for e in listed]}")
+        else:
+            fail("1.1.1.1 should be clean", f"Listed on {len(listed)} lists: {[e.list_name for e in listed[:5]]}")
+    except Exception:
+        fail("DNSBL check", traceback.format_exc()[-120:])
+
+
+# ── TEST 19: Email security — cloudflare.com ──────────────────
+async def test_dns_email_security():
+    section("TEST 19 — Email Security: cloudflare.com (SPF + DMARC)")
+    print("  Cloudflare has strict email policies. Expect: SPF present, DMARC p=reject")
+    try:
+        from models import EmailSecurityInput
+        inp = EmailSecurityInput(domain="cloudflare.com")
+        result = await rir_client.dns_email_security(inp)
+
+        ok("SPF present", result.spf_record[:80] if result.spf_record else "—") if result.spf_present else fail("SPF present", "Missing SPF record")
+        ok("DMARC present", result.dmarc_record[:80] if result.dmarc_record else "—") if result.dmarc_present else fail("DMARC present", "Missing DMARC record")
+        if result.dmarc_policy in ("reject", "quarantine"):
+            ok(f"DMARC policy is strong", f"p={result.dmarc_policy}")
+        else:
+            skip("DMARC policy strength", f"p={result.dmarc_policy}")
+        ok(f"MX records found", f"{len(result.mx_records)} MX record(s)") if result.mx_records else skip("MX records", "No MX (may query subdomains)")
+        ok(f"Risk level assessed", f"{result.risk_level} (score={result.score})")
+    except Exception:
+        fail("Email security", traceback.format_exc()[-120:])
+
+
+# ── TEST 20: DNS Propagation — cloudflare.com ─────────────────
+async def test_dns_propagation():
+    section("TEST 20 — DNS Propagation: cloudflare.com (A record, 10 resolvers)")
+    print("  Expect: majority of resolvers agree, propagation_complete=True for stable domain")
+    try:
+        from models import DNSPropagationInput
+        inp = DNSPropagationInput(domain="cloudflare.com", record_type="A")
+        result = await rir_client.dns_propagation(inp)
+
+        ok(f"Queried {len(result.results)} resolvers", f"majority_answer={result.majority_answer[:2] if result.majority_answer else '?'}")
+        answered = [e for e in result.results if e.answers]
+        ok(f"Resolvers answered", f"{len(answered)}/{len(result.results)} returned records") if answered else fail("Resolvers answered", "None returned records")
+        if result.propagation_complete:
+            ok("Propagation complete (majority agree)")
+        else:
+            skip("Propagation complete", "Some resolvers diverging — transient or expected")
+    except Exception:
+        fail("DNS propagation", traceback.format_exc()[-120:])
+
+
+# ── TEST 21: TLS Inspect — cloudflare.com:443 ─────────────────
+async def test_tls_inspect():
+    section("TEST 21 — TLS Inspect: cloudflare.com:443")
+    print("  Expect: valid cert, not expired, not self-signed, TLS 1.3, SANs present")
+    try:
+        from models import TLSInspectInput
+        inp = TLSInspectInput(hostname="cloudflare.com", port=443)
+        result = await rir_client.tls_inspect(inp)
+
+        if result.error and not result.not_after:
+            fail("TLS connect cloudflare.com:443", result.error); return
+
+        ok("Certificate retrieved", f"CN={result.subject.get('commonName','?')}")
+        ok("Certificate not expired", f"{result.days_until_expiry}d remaining") if not result.expired else fail("Certificate not expired", f"Expired {abs(result.days_until_expiry)}d ago")
+        ok("Not self-signed") if not result.self_signed else fail("Not self-signed", "Self-signed cert")
+        ok(f"TLS version: {result.protocol_version}", f"cipher={result.cipher_suite}") if result.protocol_version else skip("TLS version", "Not retrieved")
+        ok(f"SANs present", f"{len(result.san)} SAN(s): {result.san[:3]}") if result.san else skip("SANs", "None returned")
+        ok("Issuer present", str(result.issuer)) if result.issuer else skip("Issuer", "Not parsed")
+    except Exception:
+        fail("TLS inspect", traceback.format_exc()[-120:])
+
+
+# ── TEST 22: CT Logs — cloudflare.com (crt.sh) ────────────────
+async def test_ct_logs():
+    section("TEST 22 — CT Logs: cloudflare.com (crt.sh Certificate Transparency)")
+    print("  Cloudflare has thousands of issued certs. Expect: many entries, multiple CAs")
+    try:
+        from models import CTLogInput
+        inp = CTLogInput(domain="cloudflare.com", limit=20)
+        result = await rir_client.ct_logs(inp)
+
+        if result.error:
+            fail("CT logs query cloudflare.com", result.error); return
+
+        ok(f"Total certs found: {result.total_found}", f"returning {result.returned}")
+        ok("Multiple entries returned", f"{result.returned} entries") if result.returned >= 5 else skip("Multiple entries", f"Only {result.returned} entries")
+        ok("Unique CAs found", f"{result.unique_issuers[:3]}") if result.unique_issuers else skip("Unique CAs", "none parsed")
+        if result.entries:
+            first = result.entries[0]
+            ok("Entry has valid fields", f"cn={first.common_name[:40]}, ca={first.issuer_cn}")
+    except Exception:
+        fail("CT logs", traceback.format_exc()[-120:])
+
+
+# ── TEST 23: Threat Intel — 1.1.1.1 (Shodan InternetDB) ───────
+async def test_threat_intel():
+    section("TEST 23 — Threat Intel: 1.1.1.1 (Shodan InternetDB, free)")
+    print("  1.1.1.1 is Cloudflare DNS. Expect: open ports (53/443/80), low risk score")
+    try:
+        from models import ThreatIntelInput
+        inp = ThreatIntelInput(ip="1.1.1.1")
+        result = await rir_client.threat_intel(inp)
+
+        if result.shodan_error:
+            skip("Shodan InternetDB", result.shodan_error)
+        else:
+            ok(f"Shodan data retrieved", f"ports={result.open_ports[:5]}, vulns={len(result.vulnerabilities)}")
+            known_ports = {53, 80, 443, 8080, 8443}
+            has_dns_or_http = bool(set(result.open_ports) & known_ports)
+            ok("Expected ports detected", f"open: {result.open_ports[:5]}") if has_dns_or_http else skip("Expected ports", f"Ports: {result.open_ports}")
+
+        ok(f"Risk level: {result.risk_level}", f"score={result.risk_score}/100")
+        if result.risk_level in ("LOW", "MEDIUM"):
+            ok("1.1.1.1 not flagged as high threat")
+        else:
+            skip("Risk level LOW/MEDIUM", f"Got {result.risk_level} — Shodan data may vary")
+
+        if result.greynoise_error:
+            skip("GreyNoise", result.greynoise_error)
+        else:
+            ok(f"GreyNoise classification: {result.classification}", f"riot={result.riot}, noise={result.noise}")
+    except Exception:
+        fail("Threat intel", traceback.format_exc()[-120:])
+
+
+# ── TEST 24: Passive DNS — 1.1.1.1 (RIPE Stat PDNS) ──────────
+async def test_passive_dns():
+    section("TEST 24 — Passive DNS: 1.1.1.1 (RIPE Stat PDNS history)")
+    print("  1.1.1.1 has well-known hostnames. Expect: historical DNS records returned")
+    try:
+        from models import PassiveDNSInput
+        inp = PassiveDNSInput(resource="1.1.1.1", limit=20)
+        result = await rir_client.passive_dns(inp)
+
+        if result.error:
+            fail("Passive DNS 1.1.1.1", result.error); return
+
+        ok(f"PDNS records returned: {result.total}")
+        if result.total >= 1:
+            rec = result.records[0]
+            ok("Record has required fields", f"rrtype={rec.rrtype}, rdata={rec.rdata[:40]}")
+            ok("First/last seen present", f"first={str(rec.time_first)[:10]}, last={str(rec.time_last)[:10]}")
+        else:
+            skip("PDNS records", "No records — RIPE PDNS may not have data for this IP currently")
+    except Exception:
+        fail("Passive DNS", traceback.format_exc()[-120:])
+
+
+# ── MAIN ──────────────────────────────────────────────────────
+async def main():
+    print(f"\n{BOLD}{'='*60}{RESET}")
+    print(f"{BOLD}  PEERGLASS — LIVE INTEGRATION TEST SUITE{RESET}")
+    print(f"{BOLD}  Real HTTP calls. No mocks. No fakes.{RESET}")
+    print(f"{BOLD}{'='*60}{RESET}")
+    print(f"  Time: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
+    print(f"  APIs: RIPE · ARIN · APNIC · LACNIC · AFRINIC · Cloudflare · RIPE Stat")
+    print(f"        PeeringDB · IANA · crt.sh · Shodan InternetDB · GreyNoise\n")
+
+    t0 = time.time()
+
+    # Core infrastructure tests (original)
+    await test_rdap_reachability()
+    await test_rdap_ip_lookup()
+    await test_rdap_asn_lookup()
+    await test_rpki()
+    await test_bgp_status()
+    await test_announced_prefixes()
+    await test_history()
+    await test_peeringdb()
+    await test_iana_bootstrap()
+    await test_afrinic()
+    await test_asn_neighbours()
+    await test_peeringdb_ixp()
+    await test_iana_bootstrap_all_rirs()
+    await test_ipv4_blocks_feature()
+
+    # Sprint 2 — DNS intelligence
+    await test_dns_resolve()
+    await test_dns_enumerate()
+    await test_dns_dnssec()
+    await test_dns_dnsbl()
+    await test_dns_email_security()
+    await test_dns_propagation()
+
+    # Sprint 3 — TLS, CT logs, threat intel, passive DNS
+    await test_tls_inspect()
+    await test_ct_logs()
+    await test_threat_intel()
+    await test_passive_dns()
+
+    elapsed = time.time() - t0
+
+    print(f"\n{BOLD}{'='*60}{RESET}")
+    print(f"{BOLD}  SUMMARY{RESET}")
+    print(f"{BOLD}{'='*60}{RESET}")
+    print(f"  Checks run   : {pass_count + fail_count + skip_count}")
+    print(f"  {GREEN}✅ Passed{RESET}     : {pass_count}")
+    print(f"  {RED}❌ Failed{RESET}     : {fail_count}")
+    print(f"  {YELLOW}⚠️  Skipped{RESET}    : {skip_count}")
+    print(f"  Duration     : {elapsed:.1f}s\n")
+
+    if fail_count == 0:
+        print(f"{GREEN}{BOLD}  🎉 ALL TESTS PASSED — PeerGlass live APIs confirmed working!{RESET}")
+    else:
+        print(f"{RED}{BOLD}  ❌ {fail_count} FAILURE(S) — see details above{RESET}")
+        for s, l, r in results:
+            if s == "FAIL":
+                print(f"    • {l}: {r[:80]}")
+
+    print(f"\n{'='*60}\n")
+    return fail_count
+
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))

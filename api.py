@@ -49,7 +49,23 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-limiter = Limiter(key_func=get_remote_address)
+
+def _real_ip(request: Request) -> str:
+    """
+    Extract the real client IP, respecting X-Forwarded-For and X-Real-IP
+    headers set by reverse proxies (Render, nginx, Cloudflare, etc.).
+    Falls back to direct connection address if no proxy headers are present.
+    """
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_real_ip)
 
 import rir_client
 import cache as cache_module

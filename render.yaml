@@ -1,0 +1,76 @@
+# render.yaml — PeerGlass deployment on Render.com
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy instructions:
+#   1. Push this repo to GitHub
+#   2. Go to https://dashboard.render.com → New → Blueprint
+#   3. Connect your GitHub repo — Render auto-reads this file
+#   4. Set GREYNOISE_API_KEY in the dashboard (optional, for threat intel)
+#   5. Done — API is live at https://peerglass-api.onrender.com
+#
+# Architecture on Render:
+#   ┌─────────────────────────────────────────────┐
+#   │  peerglass-api  (Web Service — Python)       │
+#   │  uvicorn api:app   →   /v1/ip, /v1/dns, …   │
+#   │  Auto-deploys on every git push to main      │
+#   └─────────────────────────────────────────────┘
+#   ┌─────────────────────────────────────────────┐
+#   │  peerglass-ui  (Static Site — Sprint 7)      │
+#   │  React + Vite build → dist/                  │
+#   │  Note: uncomment when Web UI is built        │
+#   └─────────────────────────────────────────────┘
+#
+# IMPORTANT LIMITATIONS on free tier:
+#   - Service SLEEPS after 15 min of inactivity → ~30s cold start
+#   - In-memory cache (cache.py) is wiped on sleep/redeploy
+#   - Change monitor baselines are lost on sleep
+#   - Upgrade to Starter ($7/mo) for always-on with persistent cache
+#
+# MCP stdio server (server.py) is NOT deployable here —
+# it runs locally inside Claude Desktop as a stdio subprocess.
+
+services:
+  # ── REST API ─────────────────────────────────────────────────
+  - type: web
+    name: peerglass-api
+    runtime: python
+    plan: free                          # upgrade to starter for always-on
+    region: oregon                      # closest to RIR servers (ARIN/APNIC)
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /v1/meta/status
+
+    envVars:
+      # CORS — set to your frontend domain in production
+      # e.g. "https://your-username.github.io" or "*" for open access
+      - key: PEERGLASS_ALLOWED_ORIGINS
+        value: "*"
+
+      # Optional — enables GreyNoise threat classification
+      # Free API key: https://www.greynoise.io/plans/community
+      - key: GREYNOISE_API_KEY
+        sync: false                     # set manually in Render dashboard
+
+    autoDeploy: true                    # redeploy on every push to branch
+
+  # ── Web UI (uncomment after Sprint 7 builds the React UI) ────
+  # - type: web
+  #   name: peerglass-ui
+  #   runtime: static
+  #   plan: free                        # static sites never sleep
+  #   branch: main
+  #   buildCommand: cd ui && npm ci && npm run build
+  #   staticPublishPath: ui/dist
+  #   pullRequestPreviewsEnabled: true
+  #   headers:
+  #     - path: /*
+  #       name: X-Frame-Options
+  #       value: DENY
+  #     - path: /*
+  #       name: X-Content-Type-Options
+  #       value: nosniff
+  #   routes:
+  #     - type: rewrite
+  #       source: /*
+  #       destination: /index.html      # SPA fallback for client-side routing
