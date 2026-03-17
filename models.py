@@ -1299,3 +1299,72 @@ class CountryHealthResult(BaseModel):
     summary:            str     = ""
     last_checked:       str     = ""
     errors:             List[str] = Field(default_factory=list)
+
+
+# ── Sprint 6 — Advanced Platform ─────────────────────────────
+
+class ASRelationshipInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    asn: str = Field(min_length=1, max_length=20)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class ASRelationship(BaseModel):
+    peer_asn:     str
+    relationship: str  # customer | provider | peer | sibling
+    source:       str = "CAIDA AS-Rank"
+
+class ASRelationshipResult(BaseModel):
+    asn:                str
+    customers:          List[ASRelationship] = Field(default_factory=list)
+    providers:          List[ASRelationship] = Field(default_factory=list)
+    peers:              List[ASRelationship] = Field(default_factory=list)
+    total_relationships: int               = 0
+    dataset_date:       Optional[str]      = None
+    errors:             List[str]          = Field(default_factory=list)
+
+
+class GeoLookupInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    ip: str = Field(min_length=3, max_length=45)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class GeoIPResult(BaseModel):
+    ip:           str
+    city:         Optional[str]   = None
+    region:       Optional[str]   = None
+    country:      Optional[str]   = None
+    country_code: Optional[str]   = None
+    latitude:     Optional[float] = None
+    longitude:    Optional[float] = None
+    timezone:     Optional[str]   = None
+    is_eu:        Optional[bool]  = None
+    source:       str             = "MaxMind GeoLite2"
+    available:    bool            = True
+    errors:       List[str]       = Field(default_factory=list)
+
+
+class AtlasTraceInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    target:          str = Field(min_length=3, max_length=253)
+    probes:          int = Field(default=5, ge=1, le=25)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class AtlasHop(BaseModel):
+    ttl:    int
+    ip:     Optional[str]   = None
+    asn:    Optional[str]   = None
+    rtt_ms: Optional[float] = None
+
+class AtlasProbeResult(BaseModel):
+    probe_id: int
+    region:   Optional[str]   = None
+    hops:     List[AtlasHop]  = Field(default_factory=list)
+
+class AtlasTraceResult(BaseModel):
+    target:           str
+    probes_requested: int
+    probe_results:    List[AtlasProbeResult] = Field(default_factory=list)
+    measurement_id:   Optional[int]          = None
+    queried_at:       str                    = ""
+    source:           str                    = "RIPE Atlas"
+    errors:           List[str]             = Field(default_factory=list)

@@ -1636,6 +1636,90 @@ def format_country_health_md(result) -> str:
 
 
 # ──────────────────────────────────────────────────────────────
+# Sprint 6 — Advanced platform formatters
+# ──────────────────────────────────────────────────────────────
+
+def format_as_relationships_md(result) -> str:
+    lines = [f"## 🔗 AS Relationships — `{result.asn}`\n\n"]
+    lines.append(f"- **Total relationships:** {result.total_relationships}\n")
+    lines.append(f"- **Customers:** {len(result.customers)}\n")
+    lines.append(f"- **Providers:** {len(result.providers)}\n")
+    lines.append(f"- **Peers:** {len(result.peers)}\n")
+    lines.append(f"- **Source:** {result.errors[0] if result.errors and not result.total_relationships else 'CAIDA AS-Rank'}\n\n")
+    if result.providers:
+        lines.append("### Upstream Providers\n\n")
+        lines.append("| Provider ASN | Relationship |\n")
+        lines.append("|-------------|-------------|\n")
+        for r in result.providers[:20]:
+            lines.append(f"| {r.peer_asn} | {r.relationship} |\n")
+        lines.append("\n")
+    if result.customers:
+        lines.append("### Customers (downstream)\n\n")
+        lines.append("| Customer ASN | Relationship |\n")
+        lines.append("|-------------|-------------|\n")
+        for r in result.customers[:20]:
+            lines.append(f"| {r.peer_asn} | {r.relationship} |\n")
+        lines.append("\n")
+    if result.peers:
+        lines.append("### Peers\n\n")
+        lines.append("| Peer ASN | Relationship |\n")
+        lines.append("|---------|-------------|\n")
+        for r in result.peers[:20]:
+            lines.append(f"| {r.peer_asn} | {r.relationship} |\n")
+        lines.append("\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    return "".join(lines)
+
+
+def format_geo_lookup_md(result) -> str:
+    if not result.available:
+        lines = [f"## 🗺️ GeoIP — `{result.ip}`\n\n"]
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        return "".join(lines)
+    lines = [f"## 🗺️ GeoIP — `{result.ip}`\n\n"]
+    if result.city:       lines.append(f"- **City:** {result.city}\n")
+    if result.region:     lines.append(f"- **Region:** {result.region}\n")
+    if result.country:    lines.append(f"- **Country:** {result.country}\n")
+    if result.country_code: lines.append(f"- **Country code:** {result.country_code}\n")
+    if result.latitude and result.longitude:
+        lines.append(f"- **Coordinates:** {result.latitude:.4f}, {result.longitude:.4f}\n")
+    if result.timezone:   lines.append(f"- **Timezone:** {result.timezone}\n")
+    if result.is_eu is not None:
+        lines.append(f"- **EU member:** {'Yes' if result.is_eu else 'No'}\n")
+    lines.append(f"- **Source:** {result.source}\n")
+    return "".join(lines)
+
+
+def format_atlas_trace_md(result) -> str:
+    lines = [f"## 🌐 RIPE Atlas Traceroute — `{result.target}`\n\n"]
+    lines.append(f"- **Probes requested:** {result.probes_requested}\n")
+    lines.append(f"- **Results received:** {len(result.probe_results)}\n")
+    if result.measurement_id:
+        lines.append(f"- **Measurement ID:** {result.measurement_id}\n")
+    if result.queried_at:
+        lines.append(f"- **Queried at:** {result.queried_at}\n")
+    lines.append(f"- **Source:** {result.source}\n\n")
+    for pr in result.probe_results:
+        lines.append(f"#### Probe {pr.probe_id}\n\n")
+        lines.append("| TTL | IP | RTT (ms) |\n")
+        lines.append("|-----|----|----------|\n")
+        for hop in pr.hops[:30]:
+            ip  = hop.ip or "*"
+            rtt = f"{hop.rtt_ms:.1f}" if hop.rtt_ms else "*"
+            lines.append(f"| {hop.ttl} | {ip} | {rtt} |\n")
+        lines.append("\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    return "".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────
 # Sprint 4 — BGP Depth formatters
 # ──────────────────────────────────────────────────────────────
 
@@ -1790,3 +1874,4 @@ def format_route_stability_md(result) -> str:
         lines.append("\n")
 
     return "".join(lines)
+

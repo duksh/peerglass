@@ -68,6 +68,11 @@ TTL_CHOKEPOINTS       = 21_600   # 6 hours    — transit topology is stable
 TTL_OONI              = 1_800    # 30 minutes — OONI updates continuously
 TTL_COUNTRY_HEALTH    = 300      # 5 minutes  — composite live score
 
+# Sprint 6 — Advanced platform
+TTL_AS_RELATIONSHIPS = 604_800  # 7 days — CAIDA dataset is weekly
+TTL_GEO_LOOKUP       = 86_400   # 24 hours — MaxMind GeoLite2 is daily
+TTL_ATLAS_TRACE      = 300      # 5 minutes — traceroute results
+
 # ── In-memory store ─────────────────────────────────────────
 _STORE: dict[str, tuple[Any, float]] = {}
 
@@ -214,6 +219,15 @@ def make_ooni_key(country_code: str, domain: str = "") -> str:
 
 def make_country_health_key(country_code: str) -> str:
     return _make_key("country_health", country_code.upper().strip())
+
+def make_as_relationships_key(asn: str) -> str:
+    return _make_key("as_relationships", asn.upper().lstrip("AS"))
+
+def make_geo_lookup_key(ip: str) -> str:
+    return _make_key("geo_lookup", ip.strip())
+
+def make_atlas_key(target: str, probes: int) -> str:
+    return _make_key("atlas_trace", target.lower().strip(), int(probes))
 
 
 # ── Monitor Store — persistent baselines for change detection ──

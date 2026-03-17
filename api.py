@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import asyncio
 
@@ -106,6 +106,9 @@ from formatters import (
     format_chokepoints_md,
     format_ooni_report_md,
     format_country_health_md,
+    format_as_relationships_md,
+    format_geo_lookup_md,
+    format_atlas_trace_md,
     to_json,
 )
 from normalizer import normalize_ip_response, normalize_asn_response
@@ -198,7 +201,7 @@ async def root():
         "description": "Internet resource intelligence: RIR + BGP + RPKI + PeeringDB",
         "docs": "/docs",
         "redoc": "/redoc",
-        "tools": 39,
+        "tools": 42,
         "endpoints": {
             "ip":              "/v1/ip/{ip}",
             "asn":             "/v1/asn/{asn}",
@@ -237,6 +240,10 @@ async def root():
             "chokepoints":     "/v1/chokepoints/{country_code}",
             "ooni":            "/v1/ooni/{country_code}",
             "country_health":  "/v1/health/country/{country_code}",
+            "as_relationships": "/v1/as-relationships/{asn}",
+            "geo":              "/v1/geo/{ip}",
+            "atlas":            "/v1/atlas/{target}",
+            "bulk":             "/v1/bulk  (POST)",
             "cache_stats":     "/v1/meta/cache",
             "server_status":   "/v1/meta/status",
         },
@@ -1404,6 +1411,93 @@ async def country_health_endpoint(
     jsn = to_json(result)
     cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_COUNTRY_HEALTH)
     return _resp(md, jsn, format)
+
+
+# ── Sprint 6 — Advanced platform endpoints ─────────────────────
+
+@app.get("/v1/as-relationships/{asn}", tags=["BGP"], summary="AS relationship classification (CAIDA)")
+@limiter.limit(_DEFAULT_RATE)
+async def as_relationships_endpoint(request: Request, asn: str, format: str = FORMAT_QUERY):
+    cache_key = cache_module.make_as_relationships_key(asn)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_as_relationships(asn)
+    md  = format_as_relationships_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_AS_RELATIONSHIPS)
+    return _resp(md, jsn, format)
+
+
+@app.get("/v1/geo/{ip}", tags=["Enrichment"], summary="GeoIP enrichment (MaxMind GeoLite2)")
+@limiter.limit(_DEFAULT_RATE)
+async def geo_lookup_endpoint(request: Request, ip: str, format: str = FORMAT_QUERY):
+    cache_key = cache_module.make_geo_lookup_key(ip)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.geo_lookup(ip)
+    md  = format_geo_lookup_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_GEO_LOOKUP)
+    return _resp(md, jsn, format)
+
+
+@app.get("/v1/atlas/{target:path}", tags=["Network"], summary="RIPE Atlas traceroute")
+@limiter.limit("10/minute")
+async def atlas_trace_endpoint(
+    request: Request,
+    target: str,
+    probes: int = Query(default=5, ge=1, le=25),
+    format: str = FORMAT_QUERY,
+):
+    cache_key = cache_module.make_atlas_key(target, probes)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.atlas_traceroute(target, probes)
+    md  = format_atlas_trace_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_ATLAS_TRACE)
+    return _resp(md, jsn, format)
+
+
+# ── J2 — Bulk Query endpoint ──────────────────────────────────
+
+class _BulkRequest(BaseModel):
+    resources: list = Field(min_length=1, max_length=50)
+    query_type: str = "auto"
+
+@app.post("/v1/bulk", tags=["Utility"], summary="Bulk query up to 50 resources in parallel")
+@limiter.limit("10/minute")
+async def bulk_query(request: Request, body: _BulkRequest, format: str = FORMAT_QUERY):
+    """Query up to 50 IPs, ASNs, or prefixes in parallel. Auto-detects resource type."""
+    import re as _re
+
+    async def _dispatch(resource: str):
+        r = resource.strip()
+        # Auto-detect type
+        if _re.match(r"^AS\d+$", r, _re.IGNORECASE) or _re.match(r"^\d{1,10}$", r):
+            result = await rir_client.get_network_health(r)
+        elif "/" in r:
+            result = await rir_client.get_network_health(r)
+        elif _re.match(r"^\d+\.\d+\.\d+\.\d+$", r) or ":" in r:
+            result = await rir_client.get_network_health(r)
+        else:
+            result = await rir_client.get_network_health(r)
+        from formatters import format_network_health_md
+        from formatters import to_json as _to_json
+        return {"resource": r, "markdown": format_network_health_md(result), "json": _to_json(result)}
+
+    tasks   = [_dispatch(res) for res in body.resources[:50]]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    out = []
+    for res, r in zip(body.resources[:50], results):
+        if isinstance(r, Exception):
+            out.append({"resource": res, "error": str(r)})
+        else:
+            out.append({"resource": res, "data": r.get("markdown") if format != "json" else r.get("json")})
+    return {"results": out, "count": len(out)}
 
 
 # ──────────────────────────────────────────────────────────────

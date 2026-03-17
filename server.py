@@ -64,6 +64,9 @@ from models import (
     ChokePointInput,
     OONIReportInput,
     CountryHealthInput,
+    ASRelationshipInput,
+    GeoLookupInput,
+    AtlasTraceInput,
 )
 from normalizer import (
     normalize_ip_response,
@@ -108,6 +111,9 @@ from formatters import (
     format_chokepoints_md,
     format_ooni_report_md,
     format_country_health_md,
+    format_as_relationships_md,
+    format_geo_lookup_md,
+    format_atlas_trace_md,
     to_json,
 )
 
@@ -159,6 +165,9 @@ Power workflows:
   Chokepoints?        → peerglass_country_chokepoints
   OONI censorship?    → peerglass_ooni_report
   Country health?     → peerglass_country_health
+  AS relationships?   → rir_as_relationships
+  IP geolocation?     → peerglass_geo_lookup
+  Traceroute?         → peerglass_atlas_trace
 """,
 )
 
@@ -2121,6 +2130,143 @@ async def peerglass_country_health(params: CountryHealthInput) -> str:
     md  = format_country_health_md(result)
     jsn = to_json(result)
     return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 40 — AS Relationship Classification  [Sprint 6 / D6]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="rir_as_relationships",
+    annotations={
+        "title":           "AS Relationship Classification (CAIDA AS-Rank)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def rir_as_relationships(params: ASRelationshipInput) -> str:
+    """
+    Fetch AS relationship data from CAIDA AS-Rank API.
+
+    Classifies neighbouring ASNs as:
+      • Providers (upstream transit)
+      • Customers (downstream networks)
+      • Peers (settlement-free peering)
+
+    Unlike RIPE Stat asn-neighbours (which only gives left/right/uncertain),
+    CAIDA AS-Rank uses a BGP-path-based inference algorithm for higher accuracy.
+
+    Args:
+        params (ASRelationshipInput):
+            - asn (str): ASN e.g. 'AS13335' or '13335'
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Classified providers, customers, and peers with relationship type.
+    """
+    result = await rir_client.get_as_relationships(params.asn)
+    md  = format_as_relationships_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 41 — GeoIP Enrichment  [Sprint 6 / G2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_geo_lookup",
+    annotations={
+        "title":           "GeoIP Enrichment (MaxMind GeoLite2)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   False,
+    },
+)
+async def peerglass_geo_lookup(params: GeoLookupInput) -> str:
+    """
+    Look up the geographic location of an IP address using MaxMind GeoLite2.
+
+    Returns city, region, country, coordinates, and timezone when available.
+    Requires the PEERGLASS_GEOIP_DB environment variable pointing to a
+    GeoLite2-City.mmdb file (free download from maxmind.com with account).
+
+    Args:
+        params (GeoLookupInput):
+            - ip (str): IPv4 or IPv6 address
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: City, region, country, coordinates, timezone, EU membership.
+    """
+    result = await rir_client.geo_lookup(params.ip)
+    md  = format_geo_lookup_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 42 — RIPE Atlas Traceroute  [Sprint 6 / I1]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_atlas_trace",
+    annotations={
+        "title":           "RIPE Atlas Traceroute",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  False,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_atlas_trace(params: AtlasTraceInput) -> str:
+    """
+    Launch a RIPE Atlas traceroute measurement to a target IP or hostname.
+
+    Uses the RIPE Atlas global probe network (thousands of vantage points).
+    Requires PEERGLASS_RIPE_ATLAS_KEY environment variable with a valid
+    Atlas API key (free from atlas.ripe.net).
+
+    Args:
+        params (AtlasTraceInput):
+            - target (str): IP address or hostname
+            - probes (int): Number of probes to use (default 5, max 25)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Traceroute hop tables per probe with RTT and IP at each hop.
+    """
+    result = await rir_client.atlas_traceroute(params.target, params.probes)
+    md  = format_atlas_trace_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# J1 — MCP Resources (static data exposed as resources)
+# ──────────────────────────────────────────────────────────────
+
+@mcp.resource("peerglass://rir-status")
+async def resource_rir_status() -> str:
+    """Live reachability status of all 5 RIR RDAP servers."""
+    statuses = await rir_client.get_rir_server_status()
+    lines = ["# RIR RDAP Server Status\n\n"]
+    for rir_name, info in statuses.items():
+        status = "✅ Online" if info.get("status") == "ok" else "❌ Offline"
+        lines.append(f"- **{rir_name}:** {status}\n")
+    return "".join(lines)
+
+
+@mcp.resource("peerglass://ipv4-exhaustion")
+async def resource_ipv4_exhaustion() -> str:
+    """Global IPv4 exhaustion statistics from NRO delegation stats (cached 24h)."""
+    from models import IPv4StatsInput
+    result = await rir_client.get_global_ipv4_stats()
+    from formatters import format_ipv4_stats_md
+    return format_ipv4_stats_md(result)
 
 
 # ──────────────────────────────────────────────────────────────

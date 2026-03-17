@@ -41,7 +41,10 @@ from models import RIRName, RIRQueryResult, RPKIResult, RPKIValidity, \
     SatelliteConnectivityResult, SatelliteProvider, \
     ChokePointResult, TransitProvider, \
     OONIReportResult, OONIMeasurement, \
-    CountryHealthResult
+    CountryHealthResult, \
+    ASRelationshipResult, ASRelationship, \
+    GeoIPResult, \
+    AtlasTraceResult, AtlasProbeResult, AtlasHop
 
 
 # ──────────────────────────────────────────────────────────────
@@ -111,6 +114,10 @@ PEERINGDB_NET_URL   = "https://www.peeringdb.com/api/net"
 PEERINGDB_IXP_URL   = "https://www.peeringdb.com/api/ix"
 PEERINGDB_NETIXLAN_URL = "https://www.peeringdb.com/api/netixlan"
 RIPE_STAT_NEIGHBOURS_URL = "https://stat.ripe.net/data/asn-neighbours/data.json"
+
+# Sprint 6 — Advanced platform
+CAIDA_AS_RANK_URL  = "https://api.asrank.caida.org/v2/restful/asns/{asn}/neighbors"
+RIPE_ATLAS_URL     = "https://atlas.ripe.net/api/v2/measurements/"
 
 DEFAULT_TIMEOUT = 15.0
 _USER_AGENT = "peerglass/1.0.0 (PeerGlass RDAP+BGP+RPKI client; educational/research use)"
@@ -3898,4 +3905,229 @@ async def get_country_health(country_code: str) -> CountryHealthResult:
         summary=summary, last_checked=now_str, errors=errors,
     )
     _cache.set(ck, result.model_dump(), _cache.TTL_COUNTRY_HEALTH)
+    return result
+
+
+# ── D6 — AS Relationship Classification (CAIDA AS-Rank) ──────
+
+async def get_as_relationships(asn: str) -> ASRelationshipResult:
+    """
+    Fetch AS relationship data from CAIDA AS-Rank API.
+    Classifies neighbouring ASNs as customers, providers, or peers.
+    """
+    import re as _re
+    import cache as _cache
+
+    asn_norm = _re.sub(r"(?i)^as", "", asn.strip())
+    asn_str  = f"AS{asn_norm}"
+
+    ck  = _cache.make_as_relationships_key(asn_norm)
+    hit = _cache.get(ck)
+    if hit:
+        return ASRelationshipResult.model_validate(hit)
+
+    url = CAIDA_AS_RANK_URL.format(asn=asn_norm)
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+            r = await client.get(url)
+            if r.status_code == 404:
+                result = ASRelationshipResult(asn=asn_str, errors=[f"AS{asn_norm} not found in CAIDA AS-Rank"])
+                _cache.set(ck, result.model_dump(), _cache.TTL_AS_RELATIONSHIPS)
+                return result
+            r.raise_for_status()
+            data = r.json()
+    except httpx.TimeoutException:
+        return ASRelationshipResult(asn=asn_str, errors=["CAIDA AS-Rank API timed out"])
+    except Exception as exc:
+        return ASRelationshipResult(asn=asn_str, errors=[str(exc)])
+
+    # CAIDA AS-Rank neighbor format: {"data": {"asn": {"neighbors": {"edges": [{"asn": {"asn": "..."}, "relationship": "customer|provider|peer"}, ...]}}}}
+    edges = []
+    try:
+        edges = data.get("data", {}).get("asn", {}).get("neighbors", {}).get("edges", [])
+    except (AttributeError, TypeError):
+        edges = []
+
+    customers: list[ASRelationship] = []
+    providers: list[ASRelationship] = []
+    peers:     list[ASRelationship] = []
+
+    for edge in edges:
+        peer_asn_val = str(edge.get("asn", {}).get("asn", "") if isinstance(edge.get("asn"), dict) else edge.get("asn", ""))
+        rel = (edge.get("relationship") or "peer").lower()
+        obj = ASRelationship(peer_asn=f"AS{peer_asn_val}", relationship=rel)
+        if rel == "customer":
+            customers.append(obj)
+        elif rel == "provider":
+            providers.append(obj)
+        else:
+            peers.append(obj)
+
+    result = ASRelationshipResult(
+        asn=asn_str,
+        customers=customers, providers=providers, peers=peers,
+        total_relationships=len(customers) + len(providers) + len(peers),
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_AS_RELATIONSHIPS)
+    return result
+
+
+# ── G2 — GeoIP Enrichment (MaxMind GeoLite2) ────────────────
+
+async def geo_lookup(ip: str) -> GeoIPResult:
+    """
+    Lookup geographic location for *ip* using MaxMind GeoLite2 offline database.
+    Requires PEERGLASS_GEOIP_DB env var pointing to GeoLite2-City.mmdb.
+    Falls back gracefully if database is not configured.
+    """
+    import os
+    import cache as _cache
+
+    ck  = _cache.make_geo_lookup_key(ip)
+    hit = _cache.get(ck)
+    if hit:
+        return GeoIPResult.model_validate(hit)
+
+    db_path = os.environ.get("PEERGLASS_GEOIP_DB", "")
+    if not db_path:
+        result = GeoIPResult(
+            ip=ip, available=False,
+            errors=["GeoIP database not configured. Set PEERGLASS_GEOIP_DB=/path/to/GeoLite2-City.mmdb"],
+        )
+        return result
+
+    try:
+        import maxminddb
+        with maxminddb.open_database(db_path) as reader:
+            record = reader.get(ip)
+        if not record:
+            result = GeoIPResult(ip=ip, available=True, errors=[f"IP {ip} not found in database"])
+            _cache.set(ck, result.model_dump(), _cache.TTL_GEO_LOOKUP)
+            return result
+
+        city       = record.get("city", {}).get("names", {}).get("en")
+        region     = (record.get("subdivisions") or [{}])[0].get("names", {}).get("en")
+        country_r  = record.get("country", {})
+        continent  = record.get("continent", {})
+        location   = record.get("location", {})
+
+        result = GeoIPResult(
+            ip=ip,
+            city=city,
+            region=region,
+            country=country_r.get("names", {}).get("en"),
+            country_code=country_r.get("iso_code"),
+            latitude=location.get("latitude"),
+            longitude=location.get("longitude"),
+            timezone=location.get("time_zone"),
+            is_eu=country_r.get("is_in_european_union"),
+        )
+    except ImportError:
+        result = GeoIPResult(
+            ip=ip, available=False,
+            errors=["maxminddb package not installed. Run: pip install maxminddb"],
+        )
+    except Exception as exc:
+        result = GeoIPResult(ip=ip, available=False, errors=[str(exc)])
+
+    _cache.set(ck, result.model_dump(), _cache.TTL_GEO_LOOKUP)
+    return result
+
+
+# ── I1 — RIPE Atlas Traceroute ────────────────────────────────
+
+async def atlas_traceroute(target: str, probes: int = 5) -> AtlasTraceResult:
+    """
+    Launch a RIPE Atlas traceroute measurement to *target* and return results.
+    Requires PEERGLASS_RIPE_ATLAS_KEY env var with a valid Atlas API key.
+    """
+    import os
+    import datetime as _dt
+    import cache as _cache
+
+    ck  = _cache.make_atlas_key(target, probes)
+    hit = _cache.get(ck)
+    if hit:
+        return AtlasTraceResult.model_validate(hit)
+
+    api_key = os.environ.get("PEERGLASS_RIPE_ATLAS_KEY", "")
+    if not api_key:
+        result = AtlasTraceResult(
+            target=target, probes_requested=probes,
+            errors=["RIPE Atlas API key not configured. Set PEERGLASS_RIPE_ATLAS_KEY env var."],
+        )
+        return result
+
+    now_str = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Create measurement
+    measurement_def = {
+        "definitions": [{
+            "type": "traceroute",
+            "target": target,
+            "description": f"PeerGlass traceroute to {target}",
+            "protocol": "ICMP",
+            "paris": 0,
+            "af": 4,
+        }],
+        "probes": [{"type": "area", "value": "WW", "requested": probes}],
+        "is_oneoff": True,
+    }
+
+    headers = {
+        "Authorization": f"Key {api_key}",
+        "Content-Type":  "application/json",
+        "User-Agent":    _USER_AGENT,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            # Create measurement
+            cr = await client.post(RIPE_ATLAS_URL, json=measurement_def, headers=headers)
+            if cr.status_code not in (200, 201):
+                return AtlasTraceResult(
+                    target=target, probes_requested=probes,
+                    errors=[f"Atlas API error {cr.status_code}: {cr.text[:200]}"],
+                )
+            msm_ids = cr.json().get("measurements", [])
+            if not msm_ids:
+                return AtlasTraceResult(target=target, probes_requested=probes, errors=["No measurement ID returned"])
+            msm_id = msm_ids[0]
+
+            # Poll for results (up to 30 seconds)
+            results_url = f"{RIPE_ATLAS_URL}{msm_id}/results/"
+            rr = None
+            for _ in range(6):
+                await asyncio.sleep(5)
+                rr = await client.get(results_url, headers=headers)
+                if rr.status_code == 200 and rr.json():
+                    break
+
+            raw_results = rr.json() if rr is not None and rr.status_code == 200 else []
+    except httpx.TimeoutException:
+        return AtlasTraceResult(target=target, probes_requested=probes, errors=["RIPE Atlas timed out"])
+    except Exception as exc:
+        return AtlasTraceResult(target=target, probes_requested=probes, errors=[str(exc)])
+
+    # Parse traceroute results
+    probe_results: list[AtlasProbeResult] = []
+    for probe_data in raw_results[:probes]:
+        probe_id = probe_data.get("prb_id", 0)
+        hops: list[AtlasHop] = []
+        for hop in probe_data.get("result", []):
+            ttl = hop.get("hop", 0)
+            for pkt in hop.get("result", []):
+                ip  = pkt.get("from")
+                rtt = pkt.get("rtt")
+                hops.append(AtlasHop(ttl=ttl, ip=ip, rtt_ms=rtt))
+                break  # First packet per hop is enough
+        probe_results.append(AtlasProbeResult(probe_id=probe_id, hops=hops))
+
+    result = AtlasTraceResult(
+        target=target, probes_requested=probes,
+        probe_results=probe_results,
+        measurement_id=msm_id if raw_results else None,
+        queried_at=now_str,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_ATLAS_TRACE)
     return result
