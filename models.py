@@ -731,3 +731,295 @@ class ChangeMonitorResult(BaseModel):
     current_holder: Optional[str]      = None
     current_rir: Optional[str]         = None
     message: str                       = ""
+
+
+# ──────────────────────────────────────────────────────────────
+# Input Models — Sprint 2 DNS
+# ──────────────────────────────────────────────────────────────
+
+class DNSResolveInput(BaseModel):
+    """Input for forward/reverse DNS resolution."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    target: str = Field(
+        ...,
+        description="IPv4/IPv6 address (reverse PTR lookup) or domain name (forward A/AAAA lookup)",
+        min_length=2, max_length=253,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DNSEnumerateInput(BaseModel):
+    """Input for full DNS record enumeration."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain: str = Field(
+        ...,
+        description="Domain name to enumerate all DNS records for (e.g. 'cloudflare.com')",
+        min_length=3, max_length=253,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DNSSECInput(BaseModel):
+    """Input for DNSSEC chain validation."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain: str = Field(
+        ...,
+        description="Domain name to validate DNSSEC chain for (e.g. 'cloudflare.com')",
+        min_length=3, max_length=253,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DNSBLInput(BaseModel):
+    """Input for DNS blocklist (DNSBL) check."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    ip: str = Field(
+        ...,
+        description="IPv4 address to check against DNS blocklists (e.g. '1.2.3.4')",
+        min_length=7, max_length=15,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class EmailSecurityInput(BaseModel):
+    """Input for email security record analysis."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain: str = Field(
+        ...,
+        description="Domain name to audit for SPF, DMARC, DKIM, MX records (e.g. 'gmail.com')",
+        min_length=3, max_length=253,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DNSPropagationInput(BaseModel):
+    """Input for DNS propagation check across global resolvers."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain: str = Field(
+        ...,
+        description="Domain name to check propagation for (e.g. 'example.com')",
+        min_length=3, max_length=253,
+    )
+    record_type: str = Field(
+        default="A",
+        description="DNS record type to check: A, AAAA, MX, NS, TXT, CNAME",
+        pattern="^(A|AAAA|MX|NS|TXT|CNAME|SOA)$",
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+# ──────────────────────────────────────────────────────────────
+# Output Models — Sprint 2 DNS
+# ──────────────────────────────────────────────────────────────
+
+class DNSResolveResult(BaseModel):
+    """Result of a forward or reverse DNS resolution."""
+    target: str
+    is_ip: bool                              = False   # True = reverse lookup, False = forward
+    ptr_records: List[str]                   = Field(default_factory=list)
+    a_records: List[str]                     = Field(default_factory=list)
+    aaaa_records: List[str]                  = Field(default_factory=list)
+    rdap_org: Optional[str]                  = None    # RDAP owner of the IP (correlation)
+    rdap_mismatch: bool                      = False   # PTR hostname vs RDAP owner mismatch flag
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class DNSRecord(BaseModel):
+    """A single DNS resource record."""
+    rtype: str
+    value: str
+    ttl: Optional[int] = None
+
+
+class DNSEnumerateResult(BaseModel):
+    """Full DNS record set for a domain."""
+    domain: str
+    records: dict[str, List[DNSRecord]]      = Field(default_factory=dict)
+    spf_value: Optional[str]                 = None
+    dmarc_value: Optional[str]               = None
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class DNSSECResult(BaseModel):
+    """DNSSEC chain-of-trust validation result."""
+    domain: str
+    status: str                              = "INDETERMINATE"  # SECURE|INSECURE|BOGUS|INDETERMINATE
+    has_dnskey: bool                         = False
+    has_rrsig: bool                          = False
+    has_ds: bool                             = False
+    signature_expiry: Optional[str]          = None
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class DNSBLEntry(BaseModel):
+    """Result of checking an IP against a single DNS blocklist."""
+    list_name: str
+    list_description: str                    = ""
+    listed: bool                             = False
+    return_code: Optional[str]               = None
+    description: Optional[str]              = None
+
+
+class DNSBLResult(BaseModel):
+    """Aggregated result of checking an IP against all DNS blocklists."""
+    ip: str
+    listed_count: int                        = 0
+    checked_count: int                       = 0
+    entries: List[DNSBLEntry]                = Field(default_factory=list)
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class EmailSecurityResult(BaseModel):
+    """Email security posture for a domain: SPF, DMARC, DKIM, MX."""
+    domain: str
+    spf_valid: bool                          = False
+    spf_record: Optional[str]               = None
+    spf_all_mechanism: Optional[str]        = None   # +all | -all | ~all | ?all
+    dmarc_present: bool                      = False
+    dmarc_policy: Optional[str]             = None   # none | quarantine | reject
+    dmarc_rua: Optional[str]                = None   # aggregate report URI
+    dmarc_ruf: Optional[str]                = None   # forensic report URI
+    dkim_selectors_found: List[str]          = Field(default_factory=list)
+    mx_records: List[str]                    = Field(default_factory=list)
+    bimi_present: bool                       = False
+    risk_level: str                          = "UNKNOWN"  # LOW|MEDIUM|HIGH|CRITICAL
+    recommendations: List[str]               = Field(default_factory=list)
+    errors: List[str]                        = Field(default_factory=list)
+
+
+class PropagationEntry(BaseModel):
+    """DNS resolution result from a single resolver."""
+    resolver_ip: str
+    resolver_name: str
+    region: str
+    response: List[str]                      = Field(default_factory=list)
+    matches_majority: bool                   = False
+    error: Optional[str]                     = None
+
+
+class DNSPropagationResult(BaseModel):
+    """DNS propagation check across 10 global resolvers."""
+    domain: str
+    record_type: str
+    majority_answer: List[str]               = Field(default_factory=list)
+    consistent: bool                         = False
+    propagated_count: int                    = 0
+    total_resolvers: int                     = 0
+    entries: List[PropagationEntry]          = Field(default_factory=list)
+    errors: List[str]                        = Field(default_factory=list)
+
+
+# ============================================================
+# Sprint 3 — TLS, CT Logs, Threat Intel, Passive DNS
+# ============================================================
+
+# ── F1: TLS Inspection ──────────────────────────────────────
+
+class TLSInspectInput(BaseModel):
+    hostname: str
+    port: int = Field(default=443, ge=1, le=65535)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default) or 'json'",
+    )
+
+class TLSCertResult(BaseModel):
+    hostname:            str
+    port:                int
+    subject:             dict           = Field(default_factory=dict)
+    issuer:              dict           = Field(default_factory=dict)
+    san:                 List[str]      = Field(default_factory=list)
+    not_before:          str            = ""
+    not_after:           str            = ""
+    days_until_expiry:   int            = -1
+    expired:             bool           = True
+    self_signed:         bool           = False
+    cipher_suite:        Optional[str]  = None
+    protocol_version:    Optional[str]  = None
+    chain_length:        int            = 0
+    hsts:                bool           = False
+    hsts_max_age:        Optional[int]  = None
+    error:               Optional[str]  = None
+
+
+# ── F2: Certificate Transparency Logs ───────────────────────
+
+class CTLogInput(BaseModel):
+    domain: str
+    limit: int = Field(default=50, ge=1, le=500)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default) or 'json'",
+    )
+
+class CTLogEntry(BaseModel):
+    id:               int           = 0
+    issuer_cn:        str           = ""
+    common_name:      str           = ""
+    name_value:       str           = ""
+    not_before:       str           = ""
+    not_after:        str           = ""
+    entry_timestamp:  Optional[str] = None
+
+class CTLogResult(BaseModel):
+    domain:          str
+    total_found:     int             = 0
+    returned:        int             = 0
+    entries:         List[CTLogEntry] = Field(default_factory=list)
+    unique_issuers:  List[str]        = Field(default_factory=list)
+    error:           Optional[str]    = None
+
+
+# ── G1: Threat Intelligence ──────────────────────────────────
+
+class ThreatIntelInput(BaseModel):
+    ip: str
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default) or 'json'",
+    )
+
+class ThreatIntelResult(BaseModel):
+    ip:               str
+    # Shodan InternetDB (free, no key required)
+    open_ports:       List[int]      = Field(default_factory=list)
+    vulnerabilities:  List[str]      = Field(default_factory=list)
+    hostnames:        List[str]      = Field(default_factory=list)
+    tags:             List[str]      = Field(default_factory=list)
+    # GreyNoise Community (optional — requires GREYNOISE_API_KEY env var)
+    noise:            Optional[bool] = None   # True = benign internet scanner
+    riot:             Optional[bool] = None   # True = known trusted service
+    classification:   Optional[str]  = None   # malicious / benign / unknown
+    greynoise_name:   Optional[str]  = None
+    greynoise_link:   Optional[str]  = None
+    greynoise_error:  Optional[str]  = None
+    # Aggregated risk
+    risk_score:       int            = 0      # 0–100
+    risk_level:       str            = "LOW"  # LOW / MEDIUM / HIGH / CRITICAL
+    shodan_error:     Optional[str]  = None
+
+
+# ── E6: Passive DNS ─────────────────────────────────────────
+
+class PassiveDNSInput(BaseModel):
+    resource: str
+    limit: int = Field(default=100, ge=1, le=500)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' (default) or 'json'",
+    )
+
+class PassiveDNSRecord(BaseModel):
+    rrtype:     str = ""
+    rdata:      str = ""
+    time_first: str = ""
+    time_last:  str = ""
+    count:      int = 0
+
+class PassiveDNSResult(BaseModel):
+    resource:         str
+    total:            int                    = 0
+    records:          List[PassiveDNSRecord] = Field(default_factory=list)
+    query_starttime:  Optional[str]          = None
+    query_endtime:    Optional[str]          = None
+    error:            Optional[str]          = None

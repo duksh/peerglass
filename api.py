@@ -49,7 +49,23 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-limiter = Limiter(key_func=get_remote_address)
+
+def _real_ip(request: Request) -> str:
+    """
+    Extract the real client IP, respecting X-Forwarded-For and X-Real-IP
+    headers set by reverse proxies (Render, nginx, Cloudflare, etc.).
+    Falls back to direct connection address if no proxy headers are present.
+    """
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_real_ip)
 
 import rir_client
 import cache as cache_module
@@ -68,12 +84,25 @@ from formatters import (
     format_ixp_lookup_md,
     format_network_health_md,
     format_change_monitor_md,
+    format_dns_resolve_md,
+    format_dns_enumerate_md,
+    format_dns_dnssec_md,
+    format_dns_dnsbl_md,
+    format_email_security_md,
+    format_dns_propagation_md,
+    format_tls_inspect_md,
+    format_ct_logs_md,
+    format_threat_intel_md,
+    format_passive_dns_md,
     to_json,
 )
 from normalizer import normalize_ip_response, normalize_asn_response
 from models import (
-    RIRQueryResult, AbuseContact, OrgAuditResult,
+    AbuseContact, OrgAuditResult,
     ResponseFormat,
+    DNSResolveInput, DNSEnumerateInput, DNSSECInput,
+    DNSBLInput, EmailSecurityInput, DNSPropagationInput,
+    TLSInspectInput, CTLogInput, ThreatIntelInput, PassiveDNSInput,
 )
 
 # ──────────────────────────────────────────────────────────────
@@ -156,25 +185,35 @@ async def root():
         "description": "Internet resource intelligence: RIR + BGP + RPKI + PeeringDB",
         "docs": "/docs",
         "redoc": "/redoc",
-        "tools": 17,
+        "tools": 27,
         "endpoints": {
-            "ip":           "/v1/ip/{ip}",
-            "asn":          "/v1/asn/{asn}",
-            "abuse":        "/v1/abuse/{ip}",
-            "rpki":         "/v1/rpki?prefix=...&asn=...",
-            "bgp":          "/v1/bgp/{resource}",
-            "announced":    "/v1/announced/{asn}",
-            "org":          "/v1/org?name=...",
-            "history":      "/v1/history/{resource}",
-            "transfers":    "/v1/transfers/{resource}",
-            "ipv4stats":    "/v1/stats/ipv4",
-            "overview":     "/v1/overview/{prefix}",
-            "peering":      "/v1/peering/{asn}",
-            "ixp":          "/v1/ixp?query=...",
-            "health":       "/v1/health/{resource}",
-            "monitor":      "/v1/monitor/{resource}",
-            "cache_stats":  "/v1/meta/cache",
-            "server_status":"/v1/meta/status",
+            "ip":              "/v1/ip/{ip}",
+            "asn":             "/v1/asn/{asn}",
+            "abuse":           "/v1/abuse/{ip}",
+            "rpki":            "/v1/rpki?prefix=...&asn=...",
+            "bgp":             "/v1/bgp/{resource}",
+            "announced":       "/v1/announced/{asn}",
+            "org":             "/v1/org?name=...",
+            "history":         "/v1/history/{resource}",
+            "transfers":       "/v1/transfers/{resource}",
+            "ipv4stats":       "/v1/stats/ipv4",
+            "overview":        "/v1/overview/{prefix}",
+            "peering":         "/v1/peering/{asn}",
+            "ixp":             "/v1/ixp?query=...",
+            "health":          "/v1/health/{resource}",
+            "monitor":         "/v1/monitor/{resource}",
+            "dns_resolve":     "/v1/dns/resolve/{target}",
+            "dns_enumerate":   "/v1/dns/enumerate/{domain}",
+            "dns_dnssec":      "/v1/dns/dnssec/{domain}",
+            "dns_dnsbl":       "/v1/dns/dnsbl/{ip}",
+            "dns_email":       "/v1/dns/email/{domain}",
+            "dns_propagation": "/v1/dns/propagation/{domain}",
+            "tls":             "/v1/tls/{hostname}",
+            "ct_logs":         "/v1/ct/{domain}",
+            "threat_intel":    "/v1/threat/{ip}",
+            "passive_dns":     "/v1/pdns/{resource}",
+            "cache_stats":     "/v1/meta/cache",
+            "server_status":   "/v1/meta/status",
         },
     }
 
@@ -224,19 +263,29 @@ async def query_ip(
         return _resp(cached["markdown"], cached["json"], format)
 
     results = await rir_client.query_ip_all_rirs(ip)
-    resources = [normalize_ip_response(r) for r in results if r.status == "ok"]
+    normalized = []
+    for r in results:
+        if r.status == "ok" and r.data:
+            try:
+                normalized.append(normalize_ip_response(r.rir.value, r.data))
+            except Exception:
+                pass
 
-    if not resources:
+    if not normalized:
         # J3: RDAP returned nothing — try raw WHOIS port-43 fallback
         whois_result = await rir_client.get_whois_fallback(ip, "ip")
-        if whois_result:
-            resources = [normalize_ip_response(whois_result)]
-    if not resources:
+        if whois_result and whois_result.data:
+            try:
+                normalized.append(normalize_ip_response(whois_result.rir.value, whois_result.data))
+                results.append(whois_result)
+            except Exception:
+                pass
+    if not normalized:
         raise HTTPException(status_code=404, detail=f"No RDAP record found for {ip}")
 
-    query_result = RIRQueryResult(query=ip, query_type="ip", results=resources)
-    md  = format_ip_results_md(query_result)
-    jsn = to_json(query_result)
+    md  = format_ip_results_md(ip, normalized, results)
+    jsn = to_json({"ip": ip, "results": [r.model_dump(exclude={"data"}) for r in results],
+                   "normalized": [n.model_dump(exclude={"raw"}) for n in normalized]})
     cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_IP)
     return _resp(md, jsn, format)
 
@@ -265,19 +314,29 @@ async def query_asn(
         return _resp(cached["markdown"], cached["json"], format)
 
     results = await rir_client.query_asn_all_rirs(asn)
-    resources = [normalize_asn_response(r) for r in results if r.status == "ok"]
+    normalized = []
+    for r in results:
+        if r.status == "ok" and r.data:
+            try:
+                normalized.append(normalize_asn_response(r.rir.value, r.data))
+            except Exception:
+                pass
 
-    if not resources:
+    if not normalized:
         # J3: RDAP returned nothing — try raw WHOIS port-43 fallback
         whois_result = await rir_client.get_whois_fallback(asn, "asn")
-        if whois_result:
-            resources = [normalize_asn_response(whois_result)]
-    if not resources:
+        if whois_result and whois_result.data:
+            try:
+                normalized.append(normalize_asn_response(whois_result.rir.value, whois_result.data))
+                results.append(whois_result)
+            except Exception:
+                pass
+    if not normalized:
         raise HTTPException(status_code=404, detail=f"No RDAP record found for {asn}")
 
-    query_result = RIRQueryResult(query=asn, query_type="asn", results=resources)
-    md  = format_asn_results_md(query_result)
-    jsn = to_json(query_result)
+    md  = format_asn_results_md(asn, normalized, results)
+    jsn = to_json({"asn": asn, "results": [r.model_dump(exclude={"data"}) for r in results],
+                   "normalized": [n.model_dump(exclude={"raw"}) for n in normalized]})
     cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_ASN)
     return _resp(md, jsn, format)
 
@@ -750,6 +809,287 @@ async def change_monitor(
 
 
 # ──────────────────────────────────────────────────────────────
+# DNS endpoints (Sprint 2 — E1–E5, E7)
+# ──────────────────────────────────────────────────────────────
+
+_RTYPE_HELP = "DNS record type (A, AAAA, MX, TXT, NS, CNAME …). Default: auto"
+
+@app.get(
+    "/v1/dns/resolve/{target}",
+    tags=["DNS"],
+    summary="Forward/reverse DNS resolution with RDAP correlation",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def dns_resolve(
+    request: Request,
+    target: str,
+    record_type: str = Query(default="A", description=_RTYPE_HELP),
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Resolve a hostname (A/AAAA/PTR/etc.) and correlate resolved IPs with
+    RDAP registration data (holder, country, RIR, covering prefix).
+
+    **Examples:** `8.8.8.8`, `cloudflare.com`, `google.com`
+    """
+    inp = DNSResolveInput(target=target, record_type=record_type)
+    result = await rir_client.dns_resolve(inp)
+    md  = format_dns_resolve_md(result)
+    jsn = to_json(result)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/dns/enumerate/{domain}",
+    tags=["DNS"],
+    summary="Full DNS record enumeration for a domain",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def dns_enumerate(
+    request: Request,
+    domain: str,
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Query all common DNS record types (A, AAAA, MX, NS, TXT, SOA, CNAME, CAA,
+    SRV, PTR) for a domain and extract SPF/DMARC inline.
+
+    **Example:** `cloudflare.com`
+    """
+    inp = DNSEnumerateInput(domain=domain)
+    result = await rir_client.dns_enumerate(inp)
+    md  = format_dns_enumerate_md(result)
+    jsn = to_json(result)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/dns/dnssec/{domain}",
+    tags=["DNS"],
+    summary="DNSSEC chain validation",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def dns_dnssec(
+    request: Request,
+    domain: str,
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Check DNSSEC deployment: validates chain-of-trust (DNSKEY → DS → RRSIG),
+    returns SECURE / INSECURE / BOGUS / INDETERMINATE with algorithm details.
+
+    **Example:** `cloudflare.com`
+    """
+    inp = DNSSECInput(domain=domain)
+    result = await rir_client.dns_dnssec(inp)
+    md  = format_dns_dnssec_md(result)
+    jsn = to_json(result)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/dns/dnsbl/{ip}",
+    tags=["DNS"],
+    summary="DNS blocklist (DNSBL/RBL) check across 30 lists",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def dns_dnsbl(
+    request: Request,
+    ip: str,
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Check an IP against 30 DNS blocklists in parallel (Spamhaus ZEN,
+    Barracuda, SORBS, URIBL, and more). Returns per-list listed/clean status.
+
+    **Example:** `1.2.3.4`
+    """
+    inp = DNSBLInput(ip=ip)
+    result = await rir_client.dns_dnsbl(inp)
+    md  = format_dns_dnsbl_md(result)
+    jsn = to_json(result)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/dns/email/{domain}",
+    tags=["DNS"],
+    summary="Email security posture (SPF + DMARC + DKIM + BIMI)",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def dns_email(
+    request: Request,
+    domain: str,
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Comprehensive email security audit: SPF record validity, DMARC policy
+    strength, DKIM selector probing, MX records, BIMI presence, and a
+    risk score (LOW / MEDIUM / HIGH / CRITICAL).
+
+    **Example:** `example.com`
+    """
+    inp = EmailSecurityInput(domain=domain)
+    result = await rir_client.dns_email_security(inp)
+    md  = format_email_security_md(result)
+    jsn = to_json(result)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/dns/propagation/{domain}",
+    tags=["DNS"],
+    summary="DNS propagation check across 10 global resolvers",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def dns_propagation(
+    request: Request,
+    domain: str,
+    record_type: str = Query(default="A", description=_RTYPE_HELP),
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Query 10 geographically distributed resolvers (Cloudflare, Google,
+    Quad9, OpenDNS, Comodo, Verisign, etc.) and compare answers to the
+    majority — useful for verifying recent DNS changes have propagated.
+
+    **Example:** `cloudflare.com`
+    """
+    inp = DNSPropagationInput(domain=domain, record_type=record_type)
+    result = await rir_client.dns_propagation(inp)
+    md  = format_dns_propagation_md(result)
+    jsn = to_json(result)
+    return _resp(md, jsn, format)
+
+
+# ──────────────────────────────────────────────────────────────
+# Sprint 3 endpoints — TLS (F1), CT Logs (F2), Threat Intel (G1), PDNS (E6)
+# ──────────────────────────────────────────────────────────────
+
+@app.get(
+    "/v1/tls/{hostname}",
+    tags=["TLS"],
+    summary="TLS certificate inspection — chain, expiry, cipher, HSTS",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def tls_inspect(
+    request: Request,
+    hostname: str,
+    port: int = Query(default=443, ge=1, le=65535, description="TCP port (default 443)"),
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Connect to `hostname:port` over TLS and return the leaf certificate details:
+    subject, issuer, SANs, expiry, days remaining, self-signed flag, cipher suite,
+    TLS version, chain length, and HSTS header presence.
+
+    **Examples:** `cloudflare.com`, `expired.badssl.com`
+    """
+    cache_key = cache_module.make_tls_key(hostname, port)
+    cached = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    inp = TLSInspectInput(hostname=hostname, port=port)
+    result = await rir_client.tls_inspect(inp)
+    md  = format_tls_inspect_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_TLS_INSPECT)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/ct/{domain}",
+    tags=["TLS"],
+    summary="Certificate Transparency log search (crt.sh)",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def ct_logs(
+    request: Request,
+    domain: str,
+    limit: int = Query(default=50, ge=1, le=500, description="Max entries to return"),
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Search crt.sh for all certificates ever issued for a domain (including
+    subdomains). Useful for discovering shadow IT, verifying CA coverage,
+    or auditing certificate issuance history.
+
+    **Example:** `cloudflare.com`
+    """
+    cache_key = cache_module.make_ct_key(domain)
+    cached = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    inp = CTLogInput(domain=domain, limit=limit)
+    result = await rir_client.ct_logs(inp)
+    md  = format_ct_logs_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_CT_LOGS)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/threat/{ip}",
+    tags=["Threat Intelligence"],
+    summary="Threat intel — Shodan InternetDB + optional GreyNoise",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def threat_intel(
+    request: Request,
+    ip: str,
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Query Shodan InternetDB (free, no key) for open ports, CVEs, hostnames,
+    and tags. Optionally enriches with GreyNoise Community classification
+    (malicious / benign / RIOT) when `GREYNOISE_API_KEY` env var is set.
+
+    **Example:** `8.8.8.8`
+    """
+    cache_key = cache_module.make_threat_intel_key(ip)
+    cached = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    inp = ThreatIntelInput(ip=ip)
+    result = await rir_client.threat_intel(inp)
+    md  = format_threat_intel_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_THREAT_INTEL)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/pdns/{resource}",
+    tags=["DNS"],
+    summary="Passive DNS history (RIPE Stat)",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def passive_dns(
+    request: Request,
+    resource: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    format: ResponseFormat = Query(default=ResponseFormat.MARKDOWN),
+):
+    """
+    Query RIPE Stat Passive DNS for historical DNS records for an IP address
+    or domain. Shows what names have resolved to/from this resource over time,
+    with first/last seen timestamps and observation counts.
+
+    **Examples:** `8.8.8.8`, `cloudflare.com`
+    """
+    cache_key = cache_module.make_passive_dns_key(resource)
+    cached = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    inp = PassiveDNSInput(resource=resource, limit=limit)
+    result = await rir_client.passive_dns(inp)
+    md  = format_passive_dns_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_PASSIVE_DNS)
+    return _resp(md, jsn, format)
+
+
+# ──────────────────────────────────────────────────────────────
 # OpenAI / Gemini function-calling schema endpoint
 # ──────────────────────────────────────────────────────────────
 
@@ -885,6 +1225,151 @@ async def openai_tools(request: Request):
                     "properties": {
                         "resource": {"type": "string", "description": "IP prefix or ASN"},
                         "reset": {"type": "boolean", "description": "Reset baseline (default false)"},
+                    },
+                    "required": ["resource"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_dns_resolve",
+                "description": "Forward/reverse DNS resolution with RDAP IP registration correlation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "Hostname or IP address"},
+                        "record_type": {"type": "string", "description": "DNS record type (A, AAAA, PTR, MX, TXT…)"},
+                    },
+                    "required": ["target"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_dns_enumerate",
+                "description": "Enumerate all DNS records for a domain (A, AAAA, MX, NS, TXT, SOA, CNAME, CAA, SRV).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "domain": {"type": "string", "description": "Domain name, e.g. 'cloudflare.com'"}
+                    },
+                    "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_dns_dnssec",
+                "description": "DNSSEC chain validation — returns SECURE, INSECURE, BOGUS, or INDETERMINATE.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "domain": {"type": "string", "description": "Domain name"}
+                    },
+                    "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_dns_dnsbl",
+                "description": "Check an IP address against 30 DNS blocklists (Spamhaus, SORBS, Barracuda, etc.).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ip": {"type": "string", "description": "IPv4 address to check"}
+                    },
+                    "required": ["ip"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_dns_email_security",
+                "description": "Email security audit: SPF, DMARC, DKIM selectors, MX, BIMI, and risk score.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "domain": {"type": "string", "description": "Domain name"}
+                    },
+                    "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_dns_propagation",
+                "description": "DNS propagation check across 10 global resolvers — verify recent DNS changes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "domain": {"type": "string", "description": "Domain name"},
+                        "record_type": {"type": "string", "description": "DNS record type (default A)"},
+                    },
+                    "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_tls_inspect",
+                "description": "TLS certificate inspection: subject, issuer, SANs, expiry, cipher suite, HSTS.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "hostname": {"type": "string", "description": "Hostname to connect to"},
+                        "port": {"type": "integer", "description": "TCP port (default 443)"},
+                    },
+                    "required": ["hostname"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_ct_logs",
+                "description": "Certificate Transparency log search via crt.sh — find all certificates ever issued for a domain.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "domain": {"type": "string", "description": "Domain name"},
+                        "limit": {"type": "integer", "description": "Max results (default 50, max 500)"},
+                    },
+                    "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_threat_intel",
+                "description": "Threat intelligence: Shodan open ports/CVEs/hostnames (free) + GreyNoise classification (optional API key).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ip": {"type": "string", "description": "IPv4 address"}
+                    },
+                    "required": ["ip"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_passive_dns",
+                "description": "Passive DNS history from RIPE Stat — what domains/IPs has this resource resolved to/from historically.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "resource": {"type": "string", "description": "IP address or domain name"},
+                        "limit": {"type": "integer", "description": "Max records (default 100)"},
                     },
                     "required": ["resource"],
                 },

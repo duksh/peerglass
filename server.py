@@ -42,6 +42,16 @@ from models import (
     ChangeMonitorInput,
     ResponseFormat,
     OrgAuditResult,
+    DNSResolveInput,
+    DNSEnumerateInput,
+    DNSSECInput,
+    DNSBLInput,
+    EmailSecurityInput,
+    DNSPropagationInput,
+    TLSInspectInput,
+    CTLogInput,
+    ThreatIntelInput,
+    PassiveDNSInput,
 )
 from normalizer import (
     normalize_ip_response,
@@ -64,6 +74,16 @@ from formatters import (
     format_ixp_lookup_md,
     format_network_health_md,
     format_change_monitor_md,
+    format_dns_resolve_md,
+    format_dns_enumerate_md,
+    format_dns_dnssec_md,
+    format_dns_dnsbl_md,
+    format_email_security_md,
+    format_dns_propagation_md,
+    format_tls_inspect_md,
+    format_ct_logs_md,
+    format_threat_intel_md,
+    format_passive_dns_md,
     to_json,
 )
 
@@ -1217,6 +1237,395 @@ async def rir_change_monitor(params: ChangeMonitorInput) -> str:
     jsn = to_json(result)
     # Note: change_monitor results are NOT cached — each call is intentionally live
     return jsn if False else md  # always markdown (no format param for this tool)
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 18 — DNS Resolve  [Phase 5 / Sprint 2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_dns_resolve",
+    annotations={
+        "title":           "DNS Resolution with RDAP IP Correlation",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_dns_resolve(params: DNSResolveInput) -> str:
+    """
+    Resolve a hostname or reverse-lookup an IP address and correlate the
+    result with RDAP registration data (holder, country, RIR, covering prefix).
+
+    Args:
+        params (DNSResolveInput):
+            - target (str): Hostname or IP address (e.g. '8.8.8.8', 'cloudflare.com')
+            - record_type (str): DNS record type — A, AAAA, PTR, MX, TXT, NS, CNAME …
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: DNS records table + RDAP owner details for each resolved IP.
+    """
+    result = await rir_client.dns_resolve(params)
+    md  = format_dns_resolve_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 19 — DNS Enumerate  [Phase 5 / Sprint 2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_dns_enumerate",
+    annotations={
+        "title":           "Full DNS Record Enumeration",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_dns_enumerate(params: DNSEnumerateInput) -> str:
+    """
+    Enumerate all common DNS record types for a domain in one call:
+    A, AAAA, MX, NS, TXT, SOA, CNAME, CAA, SRV — plus extracts SPF and
+    DMARC policies inline.
+
+    Args:
+        params (DNSEnumerateInput):
+            - domain (str): Domain name (e.g. 'cloudflare.com')
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Per-type record tables with TTL values and extracted SPF/DMARC.
+    """
+    result = await rir_client.dns_enumerate(params)
+    md  = format_dns_enumerate_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 20 — DNSSEC Validation  [Phase 5 / Sprint 2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_dns_dnssec",
+    annotations={
+        "title":           "DNSSEC Chain Validation",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_dns_dnssec(params: DNSSECInput) -> str:
+    """
+    Validate the DNSSEC chain-of-trust for a domain. Checks DNSKEY, DS,
+    and RRSIG records and reports SECURE / INSECURE / BOGUS / INDETERMINATE.
+
+    BOGUS status means signatures exist but fail validation — a serious
+    indicator of misconfiguration or potential tampering.
+
+    Args:
+        params (DNSSECInput):
+            - domain (str): Domain name (e.g. 'cloudflare.com')
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: DNSSEC status, chain validity, record counts, and signing algorithms.
+    """
+    result = await rir_client.dns_dnssec(params)
+    md  = format_dns_dnssec_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 21 — DNSBL / Blocklist Check  [Phase 5 / Sprint 2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_dns_dnsbl",
+    annotations={
+        "title":           "DNS Blocklist (DNSBL/RBL) Check",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_dns_dnsbl(params: DNSBLInput) -> str:
+    """
+    Check an IPv4 address against 30 DNS blocklists simultaneously, including
+    Spamhaus ZEN, Barracuda, SORBS, URIBL, and more. All queries run in
+    parallel for fast results.
+
+    Args:
+        params (DNSBLInput):
+            - ip (str): IPv4 address to check (e.g. '1.2.3.4')
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Per-list listed/clean status with return codes and descriptions.
+    """
+    result = await rir_client.dns_dnsbl(params)
+    md  = format_dns_dnsbl_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 22 — Email Security Audit  [Phase 5 / Sprint 2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_dns_email_security",
+    annotations={
+        "title":           "Email Security Audit (SPF + DMARC + DKIM + BIMI)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_dns_email_security(params: EmailSecurityInput) -> str:
+    """
+    Comprehensive email security posture check for a domain:
+    - SPF: record presence, validity, and policy strength (-all / ~all / ?all)
+    - DMARC: policy (none/quarantine/reject), pct coverage, rua/ruf reporting
+    - DKIM: probes common selectors (google, selector1, default, k1, mail …)
+    - MX: mail server records
+    - BIMI: brand indicator for message identification
+    - Risk score: LOW / MEDIUM / HIGH / CRITICAL with specific issues listed
+
+    Args:
+        params (EmailSecurityInput):
+            - domain (str): Domain name (e.g. 'example.com')
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Full email security audit with risk level, score, and recommendations.
+    """
+    result = await rir_client.dns_email_security(params)
+    md  = format_email_security_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 23 — DNS Propagation  [Phase 5 / Sprint 2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_dns_propagation",
+    annotations={
+        "title":           "DNS Propagation Check (10 Global Resolvers)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_dns_propagation(params: DNSPropagationInput) -> str:
+    """
+    Check whether a recent DNS change has propagated globally by querying
+    10 geographically distributed resolvers simultaneously:
+    Cloudflare (1.1.1.1), Google (8.8.8.8), Quad9, OpenDNS, Comodo,
+    Verisign, Level3, FreeDNS, CleanBrowsing, and Alternate DNS.
+
+    Compares each resolver's answer to the majority answer and reports
+    which resolvers are stale, diverging, or failing.
+
+    Args:
+        params (DNSPropagationInput):
+            - domain (str): Domain name (e.g. 'cloudflare.com')
+            - record_type (str): DNS record type to check (default: A)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Per-resolver answer table with propagation status and majority answer.
+    """
+    result = await rir_client.dns_propagation(params)
+    md  = format_dns_propagation_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 24 — TLS Inspection  [Phase 6 / Sprint 3 F1]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_tls_inspect",
+    annotations={
+        "title":           "TLS Certificate Inspection",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_tls_inspect(params: TLSInspectInput) -> str:
+    """
+    Connect to hostname:port over TLS and return full certificate details:
+    subject, issuer, Subject Alternative Names (SANs), expiry date, days
+    remaining, self-signed flag, TLS protocol version, cipher suite,
+    chain length, and HSTS header presence.
+
+    Useful for:
+    - Verifying certificate validity before expiry
+    - Detecting self-signed or untrusted certificates
+    - Checking TLS configuration (version, cipher suite)
+    - Auditing HSTS deployment
+
+    Args:
+        params (TLSInspectInput):
+            - hostname (str): Target hostname (e.g. 'cloudflare.com')
+            - port (int): TCP port — default 443
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Certificate details, expiry countdown, issuer chain, and HSTS status.
+    """
+    result = await rir_client.tls_inspect(params)
+    md  = format_tls_inspect_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 25 — Certificate Transparency Logs  [Phase 6 / Sprint 3 F2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_ct_logs",
+    annotations={
+        "title":           "Certificate Transparency Log Search",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_ct_logs(params: CTLogInput) -> str:
+    """
+    Search crt.sh for all TLS certificates ever issued for a domain via
+    Certificate Transparency logs. Returns deduplicated entries showing
+    common name, issuer CA, validity period, and SAN name_value.
+
+    Useful for:
+    - Discovering shadow IT / undocumented subdomains
+    - Auditing which CAs have been used for a domain
+    - Finding certificates issued before/after security incidents
+    - Verifying certificate rotation
+
+    Args:
+        params (CTLogInput):
+            - domain (str): Domain name (e.g. 'cloudflare.com')
+            - limit (int): Max entries to return (default 50, max 500)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Certificate log table with CN, CA, validity dates, and unique CA summary.
+    """
+    result = await rir_client.ct_logs(params)
+    md  = format_ct_logs_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 26 — Threat Intelligence  [Phase 6 / Sprint 3 G1]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_threat_intel",
+    annotations={
+        "title":           "Threat Intelligence (Shodan + GreyNoise)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_threat_intel(params: ThreatIntelInput) -> str:
+    """
+    Passive threat intelligence for an IP address from two sources:
+
+    1. Shodan InternetDB (always available, no API key required):
+       - Open ports detected via internet scanning
+       - CVE identifiers for detected services
+       - Reverse DNS hostnames
+       - Shodan tags (cdn, vpn, tor-exit, etc.)
+
+    2. GreyNoise Community (requires GREYNOISE_API_KEY env var):
+       - Classification: malicious / benign / unknown
+       - RIOT flag: trusted service (Google, Amazon, etc.)
+       - Noise flag: benign internet background scanner
+       - Named actor or service attribution
+
+    Produces an aggregated risk score (0–100) and level (LOW / MEDIUM / HIGH / CRITICAL).
+
+    Args:
+        params (ThreatIntelInput):
+            - ip (str): IPv4 address (e.g. '1.2.3.4')
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Open ports, CVEs, GreyNoise classification, and risk assessment.
+    """
+    result = await rir_client.threat_intel(params)
+    md  = format_threat_intel_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 27 — Passive DNS  [Phase 6 / Sprint 3 E6]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_passive_dns",
+    annotations={
+        "title":           "Passive DNS History (RIPE Stat)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_passive_dns(params: PassiveDNSInput) -> str:
+    """
+    Query RIPE Stat Passive DNS for historical DNS records associated with
+    an IP address or domain name. Shows what hostnames pointed to an IP
+    (or what IPs a hostname resolved to) over time, with first/last seen
+    timestamps and observation counts.
+
+    Useful for:
+    - Tracing infrastructure changes over time
+    - Finding previously-used domains for an IP
+    - Investigating historical malware C2 infrastructure
+    - Attribution and threat hunting
+
+    Data source: RIPE NCC's Passive DNS system, which aggregates DNS
+    queries from recursive resolvers across the network.
+
+    Args:
+        params (PassiveDNSInput):
+            - resource (str): IP address or domain name
+            - limit (int): Max records (default 100, max 500)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Historical DNS records table with rrtype, value, and first/last seen dates.
+    """
+    result = await rir_client.passive_dns(params)
+    md  = format_passive_dns_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
 
 
 # ──────────────────────────────────────────────────────────────
