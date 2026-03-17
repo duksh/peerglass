@@ -83,6 +83,27 @@ uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 
 Interactive docs at: http://localhost:8000/docs
 
+### Start the Web UI
+
+```bash
+cd ui
+npm install
+npm run dev        # Dev server at http://localhost:5173
+```
+
+For production build:
+
+```bash
+cd ui
+npm run build      # Output in ui/dist/
+```
+
+Set `VITE_API_BASE_URL` to point at your PeerGlass API deployment:
+
+```bash
+VITE_API_BASE_URL=https://api.peerglass.io npm run build
+```
+
 ---
 
 ## Example Queries (Natural Language in Claude)
@@ -396,6 +417,46 @@ asyncio.gather() fires all 5 RIR queries at exactly the same time:
   RIPE    ──── responds in 0.8s ──── 404 Not Found
 
 Total wall-clock time: ~1–2s (parallel) vs ~6–8s (sequential)
+```
+
+---
+
+## Web UI (Sprint 7)
+
+PeerGlass includes a search-first, dark terminal-themed web frontend built with **React 18 + Vite 5 + TypeScript + Tailwind CSS**.
+
+### Features
+
+- **Auto-detection**: Paste any IP, ASN, prefix, domain, or 2-letter country code — the UI auto-detects the type and runs the right tool
+- **7 tool categories**: Registry · Routing · DNS · TLS · Threat · Crisis · Peering
+- **Dark terminal theme**: Dark background, monospace font (JetBrains Mono), cyan/green accent palette
+- **Markdown rendering**: All API results rendered as formatted markdown with syntax highlighting
+- **Crisis dashboard**: One-click country health check for Syria, Myanmar, Ukraine, Belarus, Iran, Russia and more
+- **41 tools accessible**: Every REST endpoint is exposed via the UI
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VITE_API_BASE_URL` | `http://localhost:8000` | PeerGlass API base URL |
+
+### Directory structure
+
+```
+ui/
+├── src/
+│   ├── App.tsx                  # Main layout + tab state
+│   ├── components/
+│   │   ├── SearchBar.tsx        # Search input with auto-type detection
+│   │   ├── ResultPanel.tsx      # Markdown result renderer
+│   │   ├── TabBar.tsx           # Category + tool tab navigation
+│   │   ├── StatusBadge.tsx      # RPKI/BGP/shutdown status indicators
+│   │   └── CountryDashboard.tsx # Crisis country quick-access grid
+│   ├── hooks/
+│   │   └── usePeerGlass.ts      # Query state management hook
+│   └── api/
+│       └── client.ts            # Typed wrappers for all 41 endpoints
+└── dist/                        # Production build output
 ```
 
 ---
