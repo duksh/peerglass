@@ -968,6 +968,7 @@ class CTLogResult(BaseModel):
     entries:         List[CTLogEntry] = Field(default_factory=list)
     unique_issuers:  List[str]        = Field(default_factory=list)
     error:           Optional[str]    = None
+    warning:         Optional[str]    = None
 
 
 # ── G1: Threat Intelligence ──────────────────────────────────

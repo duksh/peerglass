@@ -717,7 +717,13 @@ async def test_ct_logs():
         inp = CTLogInput(domain="cloudflare.com", limit=20)
         result = await rir_client.ct_logs(inp)
 
+        if result.warning:
+            skip("CT logs query cloudflare.com", result.warning); return
         if result.error:
+            # crt.sh is a third-party service; 404/503 are external timeouts, not bugs
+            crtsh_transient = any(code in result.error for code in ("404", "503", "429", "502"))
+            if crtsh_transient:
+                skip("CT logs query cloudflare.com", result.error); return
             fail("CT logs query cloudflare.com", result.error); return
 
         ok(f"Total certs found: {result.total_found}", f"returning {result.returned}")
