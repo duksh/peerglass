@@ -1410,6 +1410,316 @@ def format_passive_dns_md(result: PassiveDNSResult) -> str:
 
 
 # ──────────────────────────────────────────────────────────────
+# Sprint 5 — Humanitarian / Crisis formatters
+# ──────────────────────────────────────────────────────────────
+
+_SEVERITY_ICONS = {
+    "NORMAL":           "🟢",
+    "DEGRADED":         "🟡",
+    "PARTIAL_SHUTDOWN": "🔴",
+    "FULL_SHUTDOWN":    "🚨",
+    "UNKNOWN":          "❓",
+}
+
+
+def format_shutdown_detect_md(result) -> str:
+    icon = _SEVERITY_ICONS.get(result.severity, "❓")
+    lines = [f"## {icon} BGP Shutdown Detection — `{result.country_code}`\n\n"]
+    lines.append(f"- **Severity:** {icon} {result.severity.replace('_', ' ').title()}\n")
+    lines.append(f"- **Withdrawn:** {result.withdrawn_pct}%\n")
+    lines.append(f"- **Baseline prefixes:** {result.baseline_prefixes}\n")
+    lines.append(f"- **Current prefixes:** {result.current_prefixes}\n")
+    if result.detected_at:
+        lines.append(f"- **Checked at:** {result.detected_at}\n")
+    if result.note:
+        lines.append(f"\n> ℹ️ {result.note}\n")
+    lines.append("\n")
+    if result.affected_asns:
+        lines.append("### Sampled ASNs\n\n")
+        lines.append("| ASN | Current Prefixes |\n")
+        lines.append("|-----|------------------|\n")
+        for a in result.affected_asns[:15]:
+            lines.append(f"| {a.asn} | {a.current_prefixes} |\n")
+        if len(result.affected_asns) > 15:
+            lines.append(f"\n*…{len(result.affected_asns) - 15} more ASNs sampled.*\n")
+        lines.append("\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    lines.append(
+        "> **Note:** Baseline is established on first run. Severity is calculated by comparing "
+        "current announced prefix count against stored baseline.\n"
+    )
+    return "".join(lines)
+
+
+def format_monitor_register_md(result) -> str:
+    icon = "✅" if result.registered else "❌"
+    lines = [f"## {icon} Monitor Registration — `{result.resource}`\n\n"]
+    lines.append(f"- **Registered:** {'Yes' if result.registered else 'No'}\n")
+    lines.append(f"- **Resource:** {result.resource}\n")
+    lines.append(f"- **Webhook URL:** {result.webhook_url}\n")
+    lines.append(f"\n{result.message}\n")
+    return "".join(lines)
+
+
+def format_shutdown_timeline_md(result) -> str:
+    lines = [f"## 📅 Shutdown Timeline — `{result.resource}`\n\n"]
+    lines.append(f"- **Period:** {result.period_start} → {result.period_end}\n")
+    lines.append(f"- **Total downtime:** {result.total_downtime_hours:.1f} hours\n")
+    lines.append(f"- **Longest outage:** {result.longest_outage_hours:.1f} hours\n")
+    lines.append(f"- **Affected ASNs:** {result.affected_asn_count}\n")
+    if result.content_hash:
+        lines.append(f"- **Evidence SHA-256:** `{result.content_hash[:16]}…`\n")
+    lines.append("\n")
+    if result.events:
+        lines.append("### Events (max 100)\n\n")
+        lines.append("| Timestamp | ASN | Event |\n")
+        lines.append("|-----------|-----|-------|\n")
+        for ev in result.events[:50]:
+            ev_icon = "🔇" if ev.event_type == "WITHDRAWN" else "📡"
+            lines.append(f"| {ev.timestamp[:19]} | {ev.asn} | {ev_icon} {ev.event_type} |\n")
+        if len(result.events) > 50:
+            lines.append(f"\n*…{len(result.events) - 50} more events not shown.*\n")
+        lines.append("\n")
+    else:
+        lines.append("> No BGP state changes found in this period.\n\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    lines.append(
+        "> **Integrity:** The `content_hash` is a SHA-256 digest of the full event list "
+        "and can be used to verify evidence has not been tampered with.\n"
+    )
+    return "".join(lines)
+
+
+def format_censorship_probe_md(result) -> str:
+    icon = "🚨" if result.censored else "✅"
+    lines = [f"## {icon} DNS Censorship Probe — `{result.domain}`\n\n"]
+    lines.append(f"- **Censored:** {'Yes' if result.censored else 'No'}\n")
+    if result.technique:
+        lines.append(f"- **Technique:** {result.technique.replace('_', ' ').title()}\n")
+    if result.truth_ips:
+        lines.append(f"- **Truth IPs (neutral resolvers):** {', '.join(result.truth_ips)}\n")
+    if result.affected_resolvers:
+        lines.append(f"- **Affected resolvers:** {', '.join(result.affected_resolvers)}\n")
+    lines.append("\n")
+    if result.entries:
+        lines.append("### Resolver Responses\n\n")
+        lines.append("| Resolver | Region | Type | IPs | Matches? |\n")
+        lines.append("|----------|--------|------|-----|----------|\n")
+        for e in result.entries:
+            match_icon = "✅" if e.matches_truth else "❌"
+            ips_str    = ", ".join(e.response_ips[:3]) or "—"
+            lines.append(
+                f"| {e.resolver_name} | {e.region} | {e.response_type} "
+                f"| {ips_str} | {match_icon} |\n"
+            )
+        lines.append("\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    return "".join(lines)
+
+
+def format_satellite_connectivity_md(result) -> str:
+    icon = "🛰️" if result.any_satellite_active else "📡"
+    lines = [f"## {icon} Satellite Connectivity — `{result.country_code}`\n\n"]
+    lines.append(f"- **Any satellite active:** {'Yes' if result.any_satellite_active else 'No'}\n\n")
+    if result.providers:
+        lines.append("### Satellite Providers\n\n")
+        lines.append("| Provider | ASN | Active | Prefixes Announced |\n")
+        lines.append("|----------|-----|--------|--------------------|\n")
+        for p in result.providers:
+            active_icon = "✅" if p.is_active else "❌"
+            lines.append(f"| {p.name} | {p.asn} | {active_icon} | {p.prefixes_announced} |\n")
+        lines.append("\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    lines.append(
+        "> **Note:** Satellite ASN activity indicates global BGP presence; "
+        "coverage of a specific country requires beam / capacity data not available here.\n"
+    )
+    return "".join(lines)
+
+
+def format_chokepoints_md(result) -> str:
+    score = result.resilience_score
+    if score >= 70:   r_icon = "🟢"
+    elif score >= 40: r_icon = "🟡"
+    else:             r_icon = "🔴"
+
+    lines = [f"## {r_icon} Internet Chokepoints — `{result.country_code}`\n\n"]
+    lines.append(f"- **Resilience score:** {r_icon} {result.resilience_score}/100\n")
+    lines.append(f"- **Total in-country ASNs:** {result.total_in_country_asns}\n")
+    lines.append(f"- **Single-upstream (critical) ASNs:** {result.single_upstream_asns}\n")
+    lines.append("\n")
+    if result.transit_providers:
+        lines.append("### Top Transit Providers (by dependency)\n\n")
+        lines.append("| Provider ASN | Name | Dependent ASNs | Impact |\n")
+        lines.append("|-------------|------|----------------|--------|\n")
+        for p in result.transit_providers[:10]:
+            name = p.name or "—"
+            lines.append(f"| {p.asn} | {name} | {p.dependent_country_asns} | {p.impact_pct}% |\n")
+        lines.append("\n")
+    else:
+        lines.append("> No transit provider data available.\n\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    lines.append(
+        "> **Resilience score:** 100 = highly diverse transit, 0 = single point of failure. "
+        "Lower score = greater risk of complete internet isolation if a transit provider is cut.\n"
+    )
+    return "".join(lines)
+
+
+def format_ooni_report_md(result) -> str:
+    lines = [f"## 🔭 OONI Censorship Report — `{result.country_code}`\n\n"]
+    if result.period:
+        lines.append(f"- **Period:** {result.period}\n")
+    lines.append(f"- **Measurements:** {result.measurements_count}\n")
+    if result.tor_accessible is not None:
+        tor_icon = "✅" if result.tor_accessible else "❌"
+        lines.append(f"- **Tor accessible:** {tor_icon}\n")
+    lines.append("\n")
+    if result.blocked_domains:
+        lines.append("### Confirmed Blocked Domains\n\n")
+        for d in result.blocked_domains[:20]:
+            lines.append(f"- `{d}`\n")
+        if len(result.blocked_domains) > 20:
+            lines.append(f"\n*…{len(result.blocked_domains) - 20} more domains blocked.*\n")
+        lines.append("\n")
+    else:
+        lines.append("> No confirmed blocked domains in this period.\n\n")
+    if result.accessible_tools:
+        lines.append(f"**Accessible circumvention tools:** {', '.join(result.accessible_tools)}\n\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    lines.append("> Data from [OONI (Open Observatory of Network Interference)](https://ooni.org/)\n")
+    return "".join(lines)
+
+
+def format_country_health_md(result) -> str:
+    icon = _SEVERITY_ICONS.get(result.severity, "❓")
+    lines = [f"## {icon} Country Internet Health — `{result.country_code}`\n\n"]
+    lines.append(f"- **Overall score:** {icon} {result.score}/100 — {result.severity.replace('_', ' ').title()}\n")
+    lines.append(f"- **BGP routing score:** {result.bgp_score}/100 (weight 40%)\n")
+    lines.append(f"- **DNS censorship score:** {result.dns_score}/100 (weight 30%)\n")
+    lines.append(f"- **App accessibility score:** {result.app_score}/100 (weight 20%)\n")
+    sat_icon = "✅" if result.satellite_available else "❌"
+    lines.append(f"- **Satellite available:** {sat_icon} (weight 10%)\n")
+    if result.last_checked:
+        lines.append(f"- **Last checked:** {result.last_checked}\n")
+    lines.append("\n")
+    if result.summary:
+        lines.append(f"**Summary:** {result.summary}\n\n")
+    if result.errors:
+        lines.append("### Partial Errors\n\n")
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    lines.append(
+        "> **Methodology:** BGP score from shutdown detection, DNS score from censorship probe "
+        "against neutral resolvers, App score from OONI measurements, Satellite from BGP announced-prefixes.\n"
+    )
+    return "".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────
+# Sprint 6 — Advanced platform formatters
+# ──────────────────────────────────────────────────────────────
+
+def format_as_relationships_md(result) -> str:
+    lines = [f"## 🔗 AS Relationships — `{result.asn}`\n\n"]
+    lines.append(f"- **Total relationships:** {result.total_relationships}\n")
+    lines.append(f"- **Customers:** {len(result.customers)}\n")
+    lines.append(f"- **Providers:** {len(result.providers)}\n")
+    lines.append(f"- **Peers:** {len(result.peers)}\n")
+    lines.append(f"- **Source:** {result.errors[0] if result.errors and not result.total_relationships else 'CAIDA AS-Rank'}\n\n")
+    if result.providers:
+        lines.append("### Upstream Providers\n\n")
+        lines.append("| Provider ASN | Relationship |\n")
+        lines.append("|-------------|-------------|\n")
+        for r in result.providers[:20]:
+            lines.append(f"| {r.peer_asn} | {r.relationship} |\n")
+        lines.append("\n")
+    if result.customers:
+        lines.append("### Customers (downstream)\n\n")
+        lines.append("| Customer ASN | Relationship |\n")
+        lines.append("|-------------|-------------|\n")
+        for r in result.customers[:20]:
+            lines.append(f"| {r.peer_asn} | {r.relationship} |\n")
+        lines.append("\n")
+    if result.peers:
+        lines.append("### Peers\n\n")
+        lines.append("| Peer ASN | Relationship |\n")
+        lines.append("|---------|-------------|\n")
+        for r in result.peers[:20]:
+            lines.append(f"| {r.peer_asn} | {r.relationship} |\n")
+        lines.append("\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    return "".join(lines)
+
+
+def format_geo_lookup_md(result) -> str:
+    if not result.available:
+        lines = [f"## 🗺️ GeoIP — `{result.ip}`\n\n"]
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        return "".join(lines)
+    lines = [f"## 🗺️ GeoIP — `{result.ip}`\n\n"]
+    if result.city:       lines.append(f"- **City:** {result.city}\n")
+    if result.region:     lines.append(f"- **Region:** {result.region}\n")
+    if result.country:    lines.append(f"- **Country:** {result.country}\n")
+    if result.country_code: lines.append(f"- **Country code:** {result.country_code}\n")
+    if result.latitude and result.longitude:
+        lines.append(f"- **Coordinates:** {result.latitude:.4f}, {result.longitude:.4f}\n")
+    if result.timezone:   lines.append(f"- **Timezone:** {result.timezone}\n")
+    if result.is_eu is not None:
+        lines.append(f"- **EU member:** {'Yes' if result.is_eu else 'No'}\n")
+    lines.append(f"- **Source:** {result.source}\n")
+    return "".join(lines)
+
+
+def format_atlas_trace_md(result) -> str:
+    lines = [f"## 🌐 RIPE Atlas Traceroute — `{result.target}`\n\n"]
+    lines.append(f"- **Probes requested:** {result.probes_requested}\n")
+    lines.append(f"- **Results received:** {len(result.probe_results)}\n")
+    if result.measurement_id:
+        lines.append(f"- **Measurement ID:** {result.measurement_id}\n")
+    if result.queried_at:
+        lines.append(f"- **Queried at:** {result.queried_at}\n")
+    lines.append(f"- **Source:** {result.source}\n\n")
+    for pr in result.probe_results:
+        lines.append(f"#### Probe {pr.probe_id}\n\n")
+        lines.append("| TTL | IP | RTT (ms) |\n")
+        lines.append("|-----|----|----------|\n")
+        for hop in pr.hops[:30]:
+            ip  = hop.ip or "*"
+            rtt = f"{hop.rtt_ms:.1f}" if hop.rtt_ms else "*"
+            lines.append(f"| {hop.ttl} | {ip} | {rtt} |\n")
+        lines.append("\n")
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+    return "".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────
 # Sprint 4 — BGP Depth formatters
 # ──────────────────────────────────────────────────────────────
 
@@ -1564,3 +1874,4 @@ def format_route_stability_md(result) -> str:
         lines.append("\n")
 
     return "".join(lines)
+

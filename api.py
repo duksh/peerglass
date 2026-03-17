@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import asyncio
 
@@ -98,6 +98,17 @@ from formatters import (
     format_route_leak_md,
     format_looking_glass_md,
     format_route_stability_md,
+    format_shutdown_detect_md,
+    format_monitor_register_md,
+    format_shutdown_timeline_md,
+    format_censorship_probe_md,
+    format_satellite_connectivity_md,
+    format_chokepoints_md,
+    format_ooni_report_md,
+    format_country_health_md,
+    format_as_relationships_md,
+    format_geo_lookup_md,
+    format_atlas_trace_md,
     to_json,
 )
 from normalizer import normalize_ip_response, normalize_asn_response
@@ -107,6 +118,7 @@ from models import (
     DNSResolveInput, DNSEnumerateInput, DNSSECInput,
     DNSBLInput, EmailSecurityInput, DNSPropagationInput,
     TLSInspectInput, CTLogInput, ThreatIntelInput, PassiveDNSInput,
+    MonitorRegisterInput,
 )
 
 # ──────────────────────────────────────────────────────────────
@@ -189,7 +201,7 @@ async def root():
         "description": "Internet resource intelligence: RIR + BGP + RPKI + PeeringDB",
         "docs": "/docs",
         "redoc": "/redoc",
-        "tools": 31,
+        "tools": 42,
         "endpoints": {
             "ip":              "/v1/ip/{ip}",
             "asn":             "/v1/asn/{asn}",
@@ -220,6 +232,18 @@ async def root():
             "route_leak":      "/v1/route-leak/{prefix}",
             "looking_glass":   "/v1/looking-glass/{prefix}",
             "route_stability": "/v1/stability/{prefix}",
+            "shutdown":        "/v1/shutdown/{country_code}",
+            "shutdown_monitor":"/v1/shutdown/monitor",
+            "shutdown_timeline":"/v1/shutdown/timeline/{resource}",
+            "dns_censorship":  "/v1/censorship/{domain}",
+            "satellite":       "/v1/satellite/{country_code}",
+            "chokepoints":     "/v1/chokepoints/{country_code}",
+            "ooni":            "/v1/ooni/{country_code}",
+            "country_health":  "/v1/health/country/{country_code}",
+            "as_relationships": "/v1/as-relationships/{asn}",
+            "geo":              "/v1/geo/{ip}",
+            "atlas":            "/v1/atlas/{target}",
+            "bulk":             "/v1/bulk  (POST)",
             "cache_stats":     "/v1/meta/cache",
             "server_status":   "/v1/meta/status",
         },
@@ -1197,6 +1221,286 @@ async def route_stability_endpoint(
 
 
 # ──────────────────────────────────────────────────────────────
+# Sprint 5 — Humanitarian / Crisis endpoints
+# ──────────────────────────────────────────────────────────────
+
+@app.get(
+    "/v1/shutdown/{country_code}",
+    tags=["Crisis"],
+    summary="Country BGP shutdown detection",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def shutdown_detect_endpoint(
+    request: Request,
+    country_code: str,
+    format: str = FORMAT_QUERY,
+):
+    """Detect internet shutdowns by comparing current BGP prefix counts to baseline."""
+    cc        = country_code.upper().strip()
+    cache_key = cache_module.make_shutdown_key(cc)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.detect_shutdown(cc)
+    md  = format_shutdown_detect_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_SHUTDOWN)
+    return _resp(md, jsn, format)
+
+
+@app.post(
+    "/v1/shutdown/monitor",
+    tags=["Crisis"],
+    summary="Register a shutdown monitor webhook",
+)
+@limiter.limit("20/minute")
+async def shutdown_monitor_endpoint(
+    request: Request,
+    body: MonitorRegisterInput,
+):
+    """Register a country, ASN, or prefix for shutdown monitoring with a webhook callback."""
+    result = await rir_client.register_shutdown_monitor(
+        body.resource, body.webhook_url, body.threshold_pct, body.interval_minutes,
+    )
+    return result.model_dump()
+
+
+@app.get(
+    "/v1/shutdown/timeline/{resource}",
+    tags=["Crisis"],
+    summary="Historical shutdown timeline and evidence export",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def shutdown_timeline_endpoint(
+    request: Request,
+    resource: str,
+    start_date: str = Query(..., description="ISO date e.g. 2023-10-07"),
+    end_date:   str = Query(..., description="ISO date e.g. 2023-10-14"),
+    format: str = FORMAT_QUERY,
+):
+    """Return a BGP shutdown timeline with a SHA-256 integrity hash for evidence."""
+    cache_key = cache_module.make_shutdown_timeline_key(resource, start_date, end_date)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_shutdown_timeline(resource, start_date, end_date)
+    md  = format_shutdown_timeline_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_SHUTDOWN_TIMELINE)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/censorship/{domain:path}",
+    tags=["Crisis"],
+    summary="DNS censorship fingerprinting",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def censorship_probe_endpoint(
+    request: Request,
+    domain: str,
+    country_code: Optional[str] = Query(default=None, description="ISO country code for ISP resolvers"),
+    format: str = FORMAT_QUERY,
+):
+    """Detect DNS censorship by comparing neutral vs ISP resolver responses."""
+    cc        = (country_code or "").upper().strip()
+    cache_key = cache_module.make_censorship_key(domain, cc)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.probe_dns_censorship(domain, cc or None)
+    md  = format_censorship_probe_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_CENSORSHIP)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/satellite/{country_code}",
+    tags=["Crisis"],
+    summary="Satellite internet connectivity tracking",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def satellite_connectivity_endpoint(
+    request: Request,
+    country_code: str,
+    format: str = FORMAT_QUERY,
+):
+    """Check whether satellite providers (Starlink, Viasat, OneWeb…) are active."""
+    cc        = country_code.upper().strip()
+    cache_key = cache_module.make_satellite_key(cc)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_satellite_connectivity(cc)
+    md  = format_satellite_connectivity_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_SATELLITE)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/chokepoints/{country_code}",
+    tags=["Crisis"],
+    summary="Country internet chokepoint mapping",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def chokepoints_endpoint(
+    request: Request,
+    country_code: str,
+    format: str = FORMAT_QUERY,
+):
+    """Map transit provider dependencies and compute internet resilience score."""
+    cc        = country_code.upper().strip()
+    cache_key = cache_module.make_chokepoints_key(cc)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_country_chokepoints(cc)
+    md  = format_chokepoints_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_CHOKEPOINTS)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/ooni/{country_code}",
+    tags=["Crisis"],
+    summary="OONI censorship measurements",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def ooni_report_endpoint(
+    request: Request,
+    country_code: str,
+    domain: Optional[str] = Query(default=None, description="Filter to a specific domain"),
+    format: str = FORMAT_QUERY,
+):
+    """Fetch OONI censorship measurements — blocked domains, Tor, circumvention tools."""
+    cc        = country_code.upper().strip()
+    dom       = (domain or "").lower().strip()
+    cache_key = cache_module.make_ooni_key(cc, dom)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_ooni_report(cc, dom or None)
+    md  = format_ooni_report_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_OONI)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/health/country/{country_code}",
+    tags=["Crisis"],
+    summary="Country internet health dashboard",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def country_health_endpoint(
+    request: Request,
+    country_code: str,
+    format: str = FORMAT_QUERY,
+):
+    """Composite country internet health score: BGP + DNS + OONI + satellite."""
+    cc        = country_code.upper().strip()
+    cache_key = cache_module.make_country_health_key(cc)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_country_health(cc)
+    md  = format_country_health_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_COUNTRY_HEALTH)
+    return _resp(md, jsn, format)
+
+
+# ── Sprint 6 — Advanced platform endpoints ─────────────────────
+
+@app.get("/v1/as-relationships/{asn}", tags=["BGP"], summary="AS relationship classification (CAIDA)")
+@limiter.limit(_DEFAULT_RATE)
+async def as_relationships_endpoint(request: Request, asn: str, format: str = FORMAT_QUERY):
+    cache_key = cache_module.make_as_relationships_key(asn)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_as_relationships(asn)
+    md  = format_as_relationships_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_AS_RELATIONSHIPS)
+    return _resp(md, jsn, format)
+
+
+@app.get("/v1/geo/{ip}", tags=["Enrichment"], summary="GeoIP enrichment (MaxMind GeoLite2)")
+@limiter.limit(_DEFAULT_RATE)
+async def geo_lookup_endpoint(request: Request, ip: str, format: str = FORMAT_QUERY):
+    cache_key = cache_module.make_geo_lookup_key(ip)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.geo_lookup(ip)
+    md  = format_geo_lookup_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_GEO_LOOKUP)
+    return _resp(md, jsn, format)
+
+
+@app.get("/v1/atlas/{target:path}", tags=["Network"], summary="RIPE Atlas traceroute")
+@limiter.limit("10/minute")
+async def atlas_trace_endpoint(
+    request: Request,
+    target: str,
+    probes: int = Query(default=5, ge=1, le=25),
+    format: str = FORMAT_QUERY,
+):
+    cache_key = cache_module.make_atlas_key(target, probes)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.atlas_traceroute(target, probes)
+    md  = format_atlas_trace_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_ATLAS_TRACE)
+    return _resp(md, jsn, format)
+
+
+# ── J2 — Bulk Query endpoint ──────────────────────────────────
+
+class _BulkRequest(BaseModel):
+    resources: list = Field(min_length=1, max_length=50)
+    query_type: str = "auto"
+
+@app.post("/v1/bulk", tags=["Utility"], summary="Bulk query up to 50 resources in parallel")
+@limiter.limit("10/minute")
+async def bulk_query(request: Request, body: _BulkRequest, format: str = FORMAT_QUERY):
+    """Query up to 50 IPs, ASNs, or prefixes in parallel. Auto-detects resource type."""
+    import re as _re
+
+    async def _dispatch(resource: str):
+        r = resource.strip()
+        # Auto-detect type
+        if _re.match(r"^AS\d+$", r, _re.IGNORECASE) or _re.match(r"^\d{1,10}$", r):
+            result = await rir_client.get_network_health(r)
+        elif "/" in r:
+            result = await rir_client.get_network_health(r)
+        elif _re.match(r"^\d+\.\d+\.\d+\.\d+$", r) or ":" in r:
+            result = await rir_client.get_network_health(r)
+        else:
+            result = await rir_client.get_network_health(r)
+        from formatters import format_network_health_md
+        from formatters import to_json as _to_json
+        return {"resource": r, "markdown": format_network_health_md(result), "json": _to_json(result)}
+
+    tasks   = [_dispatch(res) for res in body.resources[:50]]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    out = []
+    for res, r in zip(body.resources[:50], results):
+        if isinstance(r, Exception):
+            out.append({"resource": res, "error": str(r)})
+        else:
+            out.append({"resource": res, "data": r.get("markdown") if format != "json" else r.get("json")})
+    return {"results": out, "count": len(out)}
+
+
+# ──────────────────────────────────────────────────────────────
 # OpenAI / Gemini function-calling schema endpoint
 # ──────────────────────────────────────────────────────────────
 
@@ -1538,6 +1842,108 @@ async def openai_tools(request: Request):
                         "hours":  {"type": "integer", "description": "Analysis window in hours (default 24, max 168)"},
                     },
                     "required": ["prefix"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_shutdown_detect",
+                "description": "Country-level BGP internet shutdown detection — compares current prefix counts against baseline to detect NORMAL/DEGRADED/PARTIAL/FULL shutdown.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "country_code": {"type": "string", "description": "ISO 3166-1 alpha-2 code e.g. SY, IR, MM"},
+                    },
+                    "required": ["country_code"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_shutdown_timeline",
+                "description": "Historical BGP shutdown timeline with SHA-256 integrity hash — for evidence, UN reports, legal proceedings.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "resource":   {"type": "string", "description": "Country code or ASN"},
+                        "start_date": {"type": "string", "description": "ISO date e.g. 2023-10-07"},
+                        "end_date":   {"type": "string", "description": "ISO date e.g. 2023-10-14"},
+                    },
+                    "required": ["resource", "start_date", "end_date"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_dns_censorship",
+                "description": "DNS censorship fingerprinting — detects NXDOMAIN injection, IP poisoning, DPI blocking by comparing neutral vs ISP resolvers.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "domain":       {"type": "string", "description": "Domain to probe e.g. twitter.com"},
+                        "country_code": {"type": "string", "description": "Optional ISO code for country-specific resolvers"},
+                    },
+                    "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_satellite_connectivity",
+                "description": "Check whether Starlink, Viasat, OneWeb, SES and other satellite providers are actively announcing BGP prefixes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "country_code": {"type": "string", "description": "ISO country code (context)"},
+                    },
+                    "required": ["country_code"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_country_chokepoints",
+                "description": "Map country internet chokepoints — identifies critical transit providers and computes a resilience score.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "country_code": {"type": "string", "description": "ISO country code e.g. SY, BY"},
+                    },
+                    "required": ["country_code"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_ooni_report",
+                "description": "OONI censorship measurements — blocked domains, Tor accessibility, circumvention tool status from probes inside the country.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "country_code": {"type": "string", "description": "ISO country code e.g. IR, RU"},
+                        "domain":       {"type": "string", "description": "Optional: filter to a specific domain"},
+                    },
+                    "required": ["country_code"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "peerglass_country_health",
+                "description": "Composite country internet health dashboard — 0-100 score from BGP + DNS + OONI + satellite signals.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "country_code": {"type": "string", "description": "ISO country code e.g. UA, SY, MM"},
+                    },
+                    "required": ["country_code"],
                 },
             },
         },

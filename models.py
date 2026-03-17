@@ -1119,3 +1119,252 @@ class PassiveDNSResult(BaseModel):
     query_starttime:  Optional[str]          = None
     query_endtime:    Optional[str]          = None
     error:            Optional[str]          = None
+
+
+# ── Sprint 5 — Humanitarian / Crisis ─────────────────────────
+
+class ShutdownDetectInput(BaseModel):
+    """H1: Country-level BGP shutdown detection."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    country_code:    str = Field(min_length=2, max_length=2, description="ISO 3166-1 alpha-2 country code e.g. SY, IR")
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class AffectedASN(BaseModel):
+    asn:               str
+    operator:          Optional[str]  = None
+    baseline_prefixes: int            = 0
+    current_prefixes:  int            = 0
+    withdrawn_pct:     float          = 0.0
+
+class ShutdownDetectResult(BaseModel):
+    country_code:      str
+    severity:          str             = "NORMAL"  # NORMAL | DEGRADED | PARTIAL_SHUTDOWN | FULL_SHUTDOWN | UNKNOWN
+    withdrawn_pct:     float           = 0.0
+    baseline_prefixes: int             = 0
+    current_prefixes:  int             = 0
+    affected_asns:     List[AffectedASN] = Field(default_factory=list)
+    detected_at:       str             = ""
+    note:              str             = ""
+    errors:            List[str]       = Field(default_factory=list)
+
+
+class MonitorRegisterInput(BaseModel):
+    """H2: Register a resource for shutdown / change monitoring with a webhook."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    resource:         str   = Field(min_length=2, max_length=50, description="Country code, ASN, or prefix")
+    webhook_url:      str   = Field(min_length=8, max_length=500, description="HTTPS URL to POST alerts to")
+    threshold_pct:    float = Field(default=20.0, ge=5.0, le=95.0)
+    interval_minutes: int   = Field(default=5, ge=1, le=60)
+
+class MonitorRegisterResult(BaseModel):
+    registered:  bool
+    resource:    str
+    webhook_url: str
+    message:     str
+
+
+class ShutdownTimelineInput(BaseModel):
+    """H3: Historical shutdown timeline and evidence export."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    resource:        str = Field(min_length=2, max_length=50, description="Country code (e.g. SY) or ASN")
+    start_date:      str = Field(min_length=8, max_length=10, description="ISO date e.g. 2023-10-07")
+    end_date:        str = Field(min_length=8, max_length=10, description="ISO date e.g. 2023-10-14")
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class ShutdownEvent(BaseModel):
+    timestamp:      str
+    asn:            str
+    operator:       Optional[str]  = None
+    event_type:     str                     # WITHDRAWN | RESTORED
+    duration_hours: Optional[float] = None
+
+class ShutdownTimelineResult(BaseModel):
+    resource:              str
+    period_start:          str
+    period_end:            str
+    events:                List[ShutdownEvent] = Field(default_factory=list)
+    total_downtime_hours:  float               = 0.0
+    longest_outage_hours:  float               = 0.0
+    affected_asn_count:    int                 = 0
+    content_hash:          str                 = ""
+    errors:                List[str]           = Field(default_factory=list)
+
+
+class CensorshipProbeInput(BaseModel):
+    """H4: DNS censorship fingerprinting."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    domain:          str            = Field(min_length=3, max_length=253)
+    country_code:    Optional[str]  = Field(default=None, min_length=2, max_length=2)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class CensorshipProbeEntry(BaseModel):
+    resolver_ip:   str
+    resolver_name: str
+    region:        str
+    response_type: str             # resolved | nxdomain | poisoned | timeout | blocked
+    response_ips:  List[str]       = Field(default_factory=list)
+    matches_truth: bool            = True
+
+class CensorshipProbeResult(BaseModel):
+    domain:             str
+    censored:           bool                      = False
+    technique:          Optional[str]             = None  # nxdomain_injection | ip_poisoning | dpi_block
+    truth_ips:          List[str]                 = Field(default_factory=list)
+    affected_resolvers: List[str]                 = Field(default_factory=list)
+    entries:            List[CensorshipProbeEntry] = Field(default_factory=list)
+    errors:             List[str]                 = Field(default_factory=list)
+
+
+class SatelliteConnectivityInput(BaseModel):
+    """H5: Satellite internet connectivity tracking for a country."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    country_code:    str = Field(min_length=2, max_length=2)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class SatelliteProvider(BaseModel):
+    name:                str
+    asn:                 str
+    is_active:           bool          = False
+    prefixes_announced:  int           = 0
+    ixp_presence:        List[str]     = Field(default_factory=list)
+
+class SatelliteConnectivityResult(BaseModel):
+    country_code:          str
+    any_satellite_active:  bool                  = False
+    providers:             List[SatelliteProvider] = Field(default_factory=list)
+    errors:                List[str]             = Field(default_factory=list)
+
+
+class ChokePointInput(BaseModel):
+    """H6: Country internet chokepoint mapping."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    country_code:    str = Field(min_length=2, max_length=2)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class TransitProvider(BaseModel):
+    asn:                   str
+    name:                  Optional[str] = None
+    dependent_country_asns: int          = 0
+    impact_pct:            float         = 0.0
+
+class ChokePointResult(BaseModel):
+    country_code:          str
+    total_in_country_asns: int                   = 0
+    single_upstream_asns:  int                   = 0
+    transit_providers:     List[TransitProvider] = Field(default_factory=list)
+    in_country_ixps:       List[str]             = Field(default_factory=list)
+    resilience_score:      float                 = 0.0
+    errors:                List[str]             = Field(default_factory=list)
+
+
+class OONIReportInput(BaseModel):
+    """H7: OONI censorship measurement integration."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    country_code:    str           = Field(min_length=2, max_length=2)
+    domain:          Optional[str] = Field(default=None, min_length=3, max_length=253)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class OONIMeasurement(BaseModel):
+    domain:     Optional[str] = None
+    test_name:  str
+    result:     str            # blocked | accessible | indeterminate
+    probe_date: Optional[str] = None
+    probe_asn:  Optional[str] = None
+
+class OONIReportResult(BaseModel):
+    country_code:      str
+    blocked_domains:   List[str]            = Field(default_factory=list)
+    accessible_tools:  List[str]            = Field(default_factory=list)
+    tor_accessible:    Optional[bool]       = None
+    measurements_count: int                 = 0
+    entries:           List[OONIMeasurement] = Field(default_factory=list)
+    period:            Optional[str]        = None
+    errors:            List[str]            = Field(default_factory=list)
+
+
+class CountryHealthInput(BaseModel):
+    """H8: Country internet health dashboard — composite score."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    country_code:    str = Field(min_length=2, max_length=2)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class CountryHealthResult(BaseModel):
+    country_code:       str
+    score:              float   = 100.0
+    severity:           str     = "NORMAL"
+    bgp_score:          float   = 100.0
+    dns_score:          float   = 100.0
+    app_score:          float   = 100.0
+    satellite_available: bool   = False
+    summary:            str     = ""
+    last_checked:       str     = ""
+    errors:             List[str] = Field(default_factory=list)
+
+
+# ── Sprint 6 — Advanced Platform ─────────────────────────────
+
+class ASRelationshipInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    asn: str = Field(min_length=1, max_length=20)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class ASRelationship(BaseModel):
+    peer_asn:     str
+    relationship: str  # customer | provider | peer | sibling
+    source:       str = "CAIDA AS-Rank"
+
+class ASRelationshipResult(BaseModel):
+    asn:                str
+    customers:          List[ASRelationship] = Field(default_factory=list)
+    providers:          List[ASRelationship] = Field(default_factory=list)
+    peers:              List[ASRelationship] = Field(default_factory=list)
+    total_relationships: int               = 0
+    dataset_date:       Optional[str]      = None
+    errors:             List[str]          = Field(default_factory=list)
+
+
+class GeoLookupInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    ip: str = Field(min_length=3, max_length=45)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class GeoIPResult(BaseModel):
+    ip:           str
+    city:         Optional[str]   = None
+    region:       Optional[str]   = None
+    country:      Optional[str]   = None
+    country_code: Optional[str]   = None
+    latitude:     Optional[float] = None
+    longitude:    Optional[float] = None
+    timezone:     Optional[str]   = None
+    is_eu:        Optional[bool]  = None
+    source:       str             = "MaxMind GeoLite2"
+    available:    bool            = True
+    errors:       List[str]       = Field(default_factory=list)
+
+
+class AtlasTraceInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    target:          str = Field(min_length=3, max_length=253)
+    probes:          int = Field(default=5, ge=1, le=25)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class AtlasHop(BaseModel):
+    ttl:    int
+    ip:     Optional[str]   = None
+    asn:    Optional[str]   = None
+    rtt_ms: Optional[float] = None
+
+class AtlasProbeResult(BaseModel):
+    probe_id: int
+    region:   Optional[str]   = None
+    hops:     List[AtlasHop]  = Field(default_factory=list)
+
+class AtlasTraceResult(BaseModel):
+    target:           str
+    probes_requested: int
+    probe_results:    List[AtlasProbeResult] = Field(default_factory=list)
+    measurement_id:   Optional[int]          = None
+    queried_at:       str                    = ""
+    source:           str                    = "RIPE Atlas"
+    errors:           List[str]             = Field(default_factory=list)

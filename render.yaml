@@ -54,23 +54,7 @@ services:
 
     autoDeploy: true                    # redeploy on every push to branch
 
-  # ── Web UI (uncomment after Sprint 7 builds the React UI) ────
-  # - type: web
-  #   name: peerglass-ui
-  #   runtime: static
-  #   plan: free                        # static sites never sleep
-  #   branch: main
-  #   buildCommand: cd ui && npm ci && npm run build
-  #   staticPublishPath: ui/dist
-  #   pullRequestPreviewsEnabled: true
-  #   headers:
-  #     - path: /*
-  #       name: X-Frame-Options
-  #       value: DENY
-  #     - path: /*
-  #       name: X-Content-Type-Options
-  #       value: nosniff
-  #   routes:
-  #     - type: rewrite
-  #       source: /*
-  #       destination: /index.html      # SPA fallback for client-side routing
+  # ── Web UI ───────────────────────────────────────────────────
+  # Hosted on GitHub Pages at https://duksh.github.io/peerglass/
+  # Deployed automatically via .github/workflows/deploy-ui.yml on push to main.
+  # No Render service needed for the UI.

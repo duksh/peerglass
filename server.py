@@ -56,6 +56,17 @@ from models import (
     RouteLeakInput,
     LookingGlassInput,
     RouteStabilityInput,
+    ShutdownDetectInput,
+    MonitorRegisterInput,
+    ShutdownTimelineInput,
+    CensorshipProbeInput,
+    SatelliteConnectivityInput,
+    ChokePointInput,
+    OONIReportInput,
+    CountryHealthInput,
+    ASRelationshipInput,
+    GeoLookupInput,
+    AtlasTraceInput,
 )
 from normalizer import (
     normalize_ip_response,
@@ -92,6 +103,17 @@ from formatters import (
     format_route_leak_md,
     format_looking_glass_md,
     format_route_stability_md,
+    format_shutdown_detect_md,
+    format_monitor_register_md,
+    format_shutdown_timeline_md,
+    format_censorship_probe_md,
+    format_satellite_connectivity_md,
+    format_chokepoints_md,
+    format_ooni_report_md,
+    format_country_health_md,
+    format_as_relationships_md,
+    format_geo_lookup_md,
+    format_atlas_trace_md,
     to_json,
 )
 
@@ -135,6 +157,17 @@ Power workflows:
   Route leak?     → rir_detect_route_leak
   AS paths?       → rir_looking_glass
   Route stable?   → rir_route_stability
+  Country shutdown?   → peerglass_shutdown_detect
+  Register webhook?   → peerglass_monitor_register
+  Shutdown history?   → peerglass_shutdown_timeline
+  DNS censored?       → peerglass_dns_censorship
+  Satellite internet? → peerglass_satellite_connectivity
+  Chokepoints?        → peerglass_country_chokepoints
+  OONI censorship?    → peerglass_ooni_report
+  Country health?     → peerglass_country_health
+  AS relationships?   → rir_as_relationships
+  IP geolocation?     → peerglass_geo_lookup
+  Traceroute?         → peerglass_atlas_trace
 """,
 )
 
@@ -1792,6 +1825,451 @@ async def rir_route_stability(params: RouteStabilityInput) -> str:
 
 
 # ──────────────────────────────────────────────────────────────
+# Tool 32 — Country BGP Shutdown Detection  [Sprint 5 / H1]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_shutdown_detect",
+    annotations={
+        "title":           "Country BGP Shutdown Detection",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_shutdown_detect(params: ShutdownDetectInput) -> str:
+    """
+    Detect internet shutdowns at the country level by comparing current BGP
+    prefix counts against a stored baseline.
+
+    On the first call for a country the baseline is established. Subsequent
+    calls measure how many prefixes have been withdrawn and classify severity:
+      • NORMAL          < 5% withdrawn
+      • DEGRADED        5–20% withdrawn
+      • PARTIAL_SHUTDOWN 20–80% withdrawn
+      • FULL_SHUTDOWN   > 80% withdrawn
+
+    Args:
+        params (ShutdownDetectInput):
+            - country_code (str): ISO 3166-1 alpha-2 code e.g. 'SY', 'IR', 'MM'
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Severity level, withdrawn percentage, and sampled ASN prefix counts.
+    """
+    result = await rir_client.detect_shutdown(params.country_code)
+    md  = format_shutdown_detect_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 33 — Shutdown Alert Webhooks  [Sprint 5 / H2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_monitor_register",
+    annotations={
+        "title":           "Register Shutdown / Change Monitor Webhook",
+        "readOnlyHint":    False,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   False,
+    },
+)
+async def peerglass_monitor_register(params: MonitorRegisterInput) -> str:
+    """
+    Register a country code, ASN, or prefix for shutdown monitoring with a
+    webhook URL. When the withdrawn% exceeds the threshold, PeerGlass will
+    POST a JSON alert to the webhook.
+
+    Args:
+        params (MonitorRegisterInput):
+            - resource (str): Country code, ASN, or prefix to monitor
+            - webhook_url (str): HTTPS URL to POST alerts to
+            - threshold_pct (float): Alert threshold in % withdrawn (default 20%)
+            - interval_minutes (int): Polling interval (default 5 min)
+
+    Returns:
+        str: Registration confirmation and registration count.
+    """
+    result = await rir_client.register_shutdown_monitor(
+        params.resource, params.webhook_url,
+        params.threshold_pct, params.interval_minutes,
+    )
+    md  = format_monitor_register_md(result)
+    jsn = to_json(result)
+    return jsn if not hasattr(params, "response_format") else (
+        jsn if getattr(params, "response_format", ResponseFormat.MARKDOWN) == ResponseFormat.JSON else md
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 34 — Shutdown Timeline & Evidence Export  [Sprint 5 / H3]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_shutdown_timeline",
+    annotations={
+        "title":           "Shutdown Timeline & Evidence Export",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_shutdown_timeline(params: ShutdownTimelineInput) -> str:
+    """
+    Retrieve a timestamped BGP withdrawal/restoration timeline for a country
+    or ASN over a date range. Includes a SHA-256 content hash for evidence
+    integrity verification (useful for UN reports, press, legal proceedings).
+
+    Args:
+        params (ShutdownTimelineInput):
+            - resource (str): Country code (e.g. 'SY') or ASN (e.g. 'AS29256')
+            - start_date (str): ISO date e.g. '2023-10-07'
+            - end_date (str): ISO date e.g. '2023-10-14'
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Timeline of BGP events, total downtime hours, and SHA-256 integrity hash.
+    """
+    result = await rir_client.get_shutdown_timeline(
+        params.resource, params.start_date, params.end_date,
+    )
+    md  = format_shutdown_timeline_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 35 — DNS Censorship Fingerprinting  [Sprint 5 / H4]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_dns_censorship",
+    annotations={
+        "title":           "DNS Censorship Fingerprinting",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_dns_censorship(params: CensorshipProbeInput) -> str:
+    """
+    Probe for DNS censorship by querying a domain from multiple resolver
+    vantage points — neutral global resolvers (Cloudflare, Google, Quad9)
+    and optionally country-specific ISP resolvers.
+
+    Detects:
+      • NXDOMAIN injection — domain exists globally but ISP returns NXDOMAIN
+      • IP poisoning — ISP returns a different (block-page) IP
+      • DPI block — timeout / connection refused
+
+    Args:
+        params (CensorshipProbeInput):
+            - domain (str): Domain to probe e.g. 'twitter.com'
+            - country_code (str, optional): ISO code for country-specific resolvers
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Censorship status, technique, and per-resolver response table.
+    """
+    result = await rir_client.probe_dns_censorship(params.domain, params.country_code)
+    md  = format_censorship_probe_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 36 — Satellite Connectivity Tracking  [Sprint 5 / H5]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_satellite_connectivity",
+    annotations={
+        "title":           "Satellite Internet Connectivity Tracking",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_satellite_connectivity(params: SatelliteConnectivityInput) -> str:
+    """
+    Check whether satellite internet providers (Starlink, Viasat, OneWeb,
+    SES, Inmarsat, HughesNet) are actively announcing BGP prefixes.
+
+    During ground-based internet shutdowns, satellite services often remain
+    the only available connectivity option for journalists and aid workers.
+
+    Args:
+        params (SatelliteConnectivityInput):
+            - country_code (str): ISO 3166-1 alpha-2 code (used for context)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Per-provider active status and announced prefix count.
+    """
+    result = await rir_client.get_satellite_connectivity(params.country_code)
+    md  = format_satellite_connectivity_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 37 — Country Chokepoint Mapping  [Sprint 5 / H6]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_country_chokepoints",
+    annotations={
+        "title":           "Country Internet Chokepoint Mapping",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_country_chokepoints(params: ChokePointInput) -> str:
+    """
+    Map internet resilience for a country by identifying transit providers
+    that many in-country ASNs depend on, and computing a resilience score.
+
+    Countries with 1–2 dominant upstream providers are catastrophically
+    vulnerable — cutting those providers isolates the entire country.
+
+    Args:
+        params (ChokePointInput):
+            - country_code (str): ISO 3166-1 alpha-2 code e.g. 'SY', 'BY'
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Resilience score (0–100), transit providers by dependency, single-upstream count.
+    """
+    result = await rir_client.get_country_chokepoints(params.country_code)
+    md  = format_chokepoints_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 38 — OONI Integration  [Sprint 5 / H7]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_ooni_report",
+    annotations={
+        "title":           "OONI Censorship Measurement Report",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_ooni_report(params: OONIReportInput) -> str:
+    """
+    Fetch OONI (Open Observatory of Network Interference) censorship
+    measurements for a country over the last 30 days.
+
+    Shows confirmed blocked websites, Tor accessibility, and circumvention
+    tool status (Psiphon, OpenVPN, Signal) as measured by OONI probes
+    running inside the country.
+
+    Args:
+        params (OONIReportInput):
+            - country_code (str): ISO 3166-1 alpha-2 code e.g. 'IR', 'RU'
+            - domain (str, optional): Filter to a specific domain
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Blocked domains, Tor accessibility, and circumvention tool status.
+    """
+    result = await rir_client.get_ooni_report(params.country_code, params.domain)
+    md  = format_ooni_report_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 39 — Country Internet Health Dashboard  [Sprint 5 / H8]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_country_health",
+    annotations={
+        "title":           "Country Internet Health Dashboard",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_country_health(params: CountryHealthInput) -> str:
+    """
+    Composite country internet health score combining:
+      • BGP shutdown detection (40%) — routing table withdrawal analysis
+      • DNS censorship probe (30%)   — neutral vs ISP resolver comparison
+      • OONI app score (20%)         — blocked domains and tool access
+      • Satellite availability (10%) — Starlink/Viasat/OneWeb BGP presence
+
+    Gives journalists, NGO directors, and crisis responders a single
+    0–100 score and plain-language summary of internet conditions.
+
+    Args:
+        params (CountryHealthInput):
+            - country_code (str): ISO 3166-1 alpha-2 code e.g. 'UA', 'SY', 'MM'
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Overall score, severity level, component scores, and plain-language summary.
+    """
+    result = await rir_client.get_country_health(params.country_code)
+    md  = format_country_health_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 40 — AS Relationship Classification  [Sprint 6 / D6]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="rir_as_relationships",
+    annotations={
+        "title":           "AS Relationship Classification (CAIDA AS-Rank)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def rir_as_relationships(params: ASRelationshipInput) -> str:
+    """
+    Fetch AS relationship data from CAIDA AS-Rank API.
+
+    Classifies neighbouring ASNs as:
+      • Providers (upstream transit)
+      • Customers (downstream networks)
+      • Peers (settlement-free peering)
+
+    Unlike RIPE Stat asn-neighbours (which only gives left/right/uncertain),
+    CAIDA AS-Rank uses a BGP-path-based inference algorithm for higher accuracy.
+
+    Args:
+        params (ASRelationshipInput):
+            - asn (str): ASN e.g. 'AS13335' or '13335'
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Classified providers, customers, and peers with relationship type.
+    """
+    result = await rir_client.get_as_relationships(params.asn)
+    md  = format_as_relationships_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 41 — GeoIP Enrichment  [Sprint 6 / G2]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_geo_lookup",
+    annotations={
+        "title":           "GeoIP Enrichment (MaxMind GeoLite2)",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   False,
+    },
+)
+async def peerglass_geo_lookup(params: GeoLookupInput) -> str:
+    """
+    Look up the geographic location of an IP address using MaxMind GeoLite2.
+
+    Returns city, region, country, coordinates, and timezone when available.
+    Requires the PEERGLASS_GEOIP_DB environment variable pointing to a
+    GeoLite2-City.mmdb file (free download from maxmind.com with account).
+
+    Args:
+        params (GeoLookupInput):
+            - ip (str): IPv4 or IPv6 address
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: City, region, country, coordinates, timezone, EU membership.
+    """
+    result = await rir_client.geo_lookup(params.ip)
+    md  = format_geo_lookup_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 42 — RIPE Atlas Traceroute  [Sprint 6 / I1]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="peerglass_atlas_trace",
+    annotations={
+        "title":           "RIPE Atlas Traceroute",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  False,
+        "openWorldHint":   True,
+    },
+)
+async def peerglass_atlas_trace(params: AtlasTraceInput) -> str:
+    """
+    Launch a RIPE Atlas traceroute measurement to a target IP or hostname.
+
+    Uses the RIPE Atlas global probe network (thousands of vantage points).
+    Requires PEERGLASS_RIPE_ATLAS_KEY environment variable with a valid
+    Atlas API key (free from atlas.ripe.net).
+
+    Args:
+        params (AtlasTraceInput):
+            - target (str): IP address or hostname
+            - probes (int): Number of probes to use (default 5, max 25)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Traceroute hop tables per probe with RTT and IP at each hop.
+    """
+    result = await rir_client.atlas_traceroute(params.target, params.probes)
+    md  = format_atlas_trace_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# J1 — MCP Resources (static data exposed as resources)
+# ──────────────────────────────────────────────────────────────
+
+@mcp.resource("peerglass://rir-status")
+async def resource_rir_status() -> str:
+    """Live reachability status of all 5 RIR RDAP servers."""
+    statuses = await rir_client.get_rir_server_status()
+    lines = ["# RIR RDAP Server Status\n\n"]
+    for rir_name, info in statuses.items():
+        status = "✅ Online" if info.get("status") == "ok" else "❌ Offline"
+        lines.append(f"- **{rir_name}:** {status}\n")
+    return "".join(lines)
+
+
+@mcp.resource("peerglass://ipv4-exhaustion")
+async def resource_ipv4_exhaustion() -> str:
+    """Global IPv4 exhaustion statistics from NRO delegation stats (cached 24h)."""
+    from models import IPv4StatsInput
+    result = await rir_client.get_global_ipv4_stats()
+    from formatters import format_ipv4_stats_md
+    return format_ipv4_stats_md(result)
+
+
+# ──────────────────────────────────────────────────────────────
 # Entry Point
 # ──────────────────────────────────────────────────────────────
 
@@ -1801,3 +2279,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

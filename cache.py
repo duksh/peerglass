@@ -59,6 +59,20 @@ TTL_ROUTE_LEAK       = 300     # 5 minutes  — BGP state can shift quickly
 TTL_LOOKING_GLASS    = 300     # 5 minutes  — live routing table snapshots
 TTL_ROUTE_STABILITY  = 900     # 15 minutes — stability window is time-sensitive
 
+# Sprint 5 — Humanitarian / crisis
+TTL_SHUTDOWN          = 300      # 5 minutes  — shutdown changes fast
+TTL_SHUTDOWN_TIMELINE = 3_600    # 1 hour     — historical evidence
+TTL_CENSORSHIP        = 600      # 10 minutes — DNS censorship can change
+TTL_SATELLITE         = 900      # 15 minutes — satellite BGP changes slowly
+TTL_CHOKEPOINTS       = 21_600   # 6 hours    — transit topology is stable
+TTL_OONI              = 1_800    # 30 minutes — OONI updates continuously
+TTL_COUNTRY_HEALTH    = 300      # 5 minutes  — composite live score
+
+# Sprint 6 — Advanced platform
+TTL_AS_RELATIONSHIPS = 604_800  # 7 days — CAIDA dataset is weekly
+TTL_GEO_LOOKUP       = 86_400   # 24 hours — MaxMind GeoLite2 is daily
+TTL_ATLAS_TRACE      = 300      # 5 minutes — traceroute results
+
 # ── In-memory store ─────────────────────────────────────────
 _STORE: dict[str, tuple[Any, float]] = {}
 
@@ -183,6 +197,37 @@ def make_looking_glass_key(prefix: str, vantage_points: int) -> str:
 
 def make_route_stability_key(prefix: str, hours: int) -> str:
     return _make_key("route_stability", prefix.strip(), int(hours))
+
+# Sprint 5 — Humanitarian / crisis
+def make_shutdown_key(country_code: str) -> str:
+    return _make_key("shutdown", country_code.upper().strip())
+
+def make_shutdown_timeline_key(resource: str, start: str, end: str) -> str:
+    return _make_key("shutdown_timeline", resource.upper().strip(), start, end)
+
+def make_censorship_key(domain: str, country_code: str = "") -> str:
+    return _make_key("censorship", domain.lower().strip(), country_code.upper().strip())
+
+def make_satellite_key(country_code: str) -> str:
+    return _make_key("satellite", country_code.upper().strip())
+
+def make_chokepoints_key(country_code: str) -> str:
+    return _make_key("chokepoints", country_code.upper().strip())
+
+def make_ooni_key(country_code: str, domain: str = "") -> str:
+    return _make_key("ooni", country_code.upper().strip(), domain.lower().strip())
+
+def make_country_health_key(country_code: str) -> str:
+    return _make_key("country_health", country_code.upper().strip())
+
+def make_as_relationships_key(asn: str) -> str:
+    return _make_key("as_relationships", asn.upper().lstrip("AS"))
+
+def make_geo_lookup_key(ip: str) -> str:
+    return _make_key("geo_lookup", ip.strip())
+
+def make_atlas_key(target: str, probes: int) -> str:
+    return _make_key("atlas_trace", target.lower().strip(), int(probes))
 
 
 # ── Monitor Store — persistent baselines for change detection ──

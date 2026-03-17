@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-terminal-bg text-terminal-text font-mono;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-terminal-bg;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-terminal-border rounded-full;
+  }
+}
+
+@layer components {
+  .terminal-card {
+    @apply bg-terminal-surface border border-terminal-border rounded-lg;
+  }
+
+  .terminal-input {
+    @apply bg-terminal-bg border border-terminal-border rounded-lg px-4 py-3
+           text-terminal-text font-mono placeholder-terminal-muted
+           focus:outline-none focus:border-terminal-cyan focus:ring-1 focus:ring-terminal-cyan
+           transition-colors;
+  }
+
+  .tab-button {
+    @apply px-3 py-1.5 rounded text-sm font-mono text-terminal-muted
+           hover:text-terminal-text hover:bg-terminal-border transition-colors cursor-pointer;
+  }
+
+  .tab-button.active {
+    @apply text-terminal-cyan bg-terminal-surface border border-terminal-border;
+  }
+
+  .status-badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono uppercase tracking-wide;
+  }
+}
+
+/* Markdown output styling */
+.prose-terminal h1,
+.prose-terminal h2,
+.prose-terminal h3 {
+  @apply text-terminal-cyan font-mono mt-4 mb-2;
+}
+.prose-terminal h2 { @apply text-lg; }
+.prose-terminal h3 { @apply text-base; }
+
+.prose-terminal p { @apply my-2 text-terminal-text; }
+
+.prose-terminal table {
+  @apply w-full border-collapse text-sm my-3;
+}
+.prose-terminal th {
+  @apply text-left px-3 py-1.5 border-b border-terminal-border text-terminal-muted uppercase text-xs tracking-wide;
+}
+.prose-terminal td {
+  @apply px-3 py-1.5 border-b border-terminal-border/50 text-terminal-text;
+}
+.prose-terminal tr:hover td {
+  @apply bg-terminal-border/20;
+}
+
+.prose-terminal code {
+  @apply bg-terminal-border/40 text-terminal-green px-1 rounded text-sm font-mono;
+}
+.prose-terminal pre {
+  @apply bg-terminal-bg border border-terminal-border rounded p-3 overflow-x-auto my-3;
+}
+.prose-terminal pre code {
+  @apply bg-transparent p-0 text-terminal-text;
+}
+
+.prose-terminal blockquote {
+  @apply border-l-2 border-terminal-yellow pl-3 my-2 text-terminal-muted italic;
+}
+
+.prose-terminal a {
+  @apply text-terminal-cyan hover:underline;
+}
+
+.prose-terminal ul, .prose-terminal ol {
+  @apply pl-5 my-2;
+}
+.prose-terminal li { @apply my-1; }
+.prose-terminal li::marker { @apply text-terminal-muted; }

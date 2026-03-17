@@ -20,6 +20,7 @@ print("\n1. COMPILE CHECK — all .py files")
 files = [
     "server.py", "rir_client.py", "formatters.py",
     "models.py", "cache.py", "normalizer.py", "api.py",
+    "config.py", "logging_config.py", "scripts/export_schema.py",
 ]
 for f in files:
     try:
@@ -109,19 +110,19 @@ else:
 
 
 # ── 7. TOOL COUNT ────────────────────────────────────────────
-print("\n7. TOOL COUNT — 31 @mcp.tool() decorators in server.py")
+print("\n7. TOOL COUNT — 42 @mcp.tool() decorators in server.py")
 # Decorator is @mcp.tool( with description kwarg on next line
 tools_found = re.findall(r"@mcp\.tool\(", server_src)
 count = len(tools_found)
-if count == 31:
+if count == 42:
     print(f"   ✅ {count} @mcp.tool() decorators found")
 else:
-    print(f"   ❌ Expected 31, found {count}")
+    print(f"   ❌ Expected 42, found {count}")
     errors.append(f"tool_count:{count}")
 
 
 # ── 8. REST ENDPOINTS ────────────────────────────────────────
-print("\n8. REST API — all 29 endpoints present in api.py")
+print("\n8. REST API — all endpoints present in api.py")
 api_src = open("api.py").read()
 routes = [
     "/v1/ip/{ip}",           "/v1/asn/{asn}",
@@ -139,6 +140,12 @@ routes = [
     "/v1/threat/{ip}",           "/v1/pdns/{resource}",
     "/v1/irr",                   "/v1/route-leak/",
     "/v1/looking-glass/",        "/v1/stability/",
+    "/v1/shutdown/",             "/v1/shutdown/monitor",
+    "/v1/shutdown/timeline/",    "/v1/censorship/",
+    "/v1/satellite/",            "/v1/chokepoints/",
+    "/v1/ooni/",                 "/v1/health/country/",
+    "/v1/as-relationships/{asn}", "/v1/geo/{ip}",
+    "/v1/atlas/{target:path}",   "/v1/bulk",
 ]
 for r in routes:
     if r in api_src:
@@ -159,9 +166,9 @@ try:
     r = client.get("/")
     assert r.status_code == 200, f"Root returned {r.status_code}"
     data = r.json()
-    assert data["tools"] == 31, f"Root shows {data['tools']} tools not 31"
+    assert data["tools"] == 42, f"Root shows {data['tools']} tools not 42"
     assert data["name"] == "PeerGlass API", f"Name is {data['name']}"
-    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=31")
+    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=42")
 
     r = client.get("/v1/meta/cache")
     assert r.status_code == 200
@@ -193,12 +200,12 @@ except Exception as e:
 
 
 # ── 10. README ───────────────────────────────────────────────
-print("\n10. README — PeerGlass branding, 27 tools, RDAP note, historical-whois explained")
+print("\n10. README — PeerGlass branding, 42 tools, RDAP note, historical-whois explained")
 readme = open("README.md").read()
 
 must_contain = [
     ("PeerGlass",              "Product name present"),
-    ("31 tools",               "Correct tool count (31)"),
+    ("42 tools",               "Correct tool count (42)"),
     ("RDAP (RFC 7480",         "RDAP RFC reference"),
     ("Protocol note",          "WHOIS→RDAP explanation block"),
     ("peerglass",              "MCP config uses peerglass"),
@@ -585,6 +592,245 @@ for k in sprint4_ttls:
         errors.append(f"sprint4:cache:{k}")
 
 
+# ── SPRINT 5 — Humanitarian / Crisis (H1–H8) ─────────────────
+print()
+print("15. SPRINT 5 — Shutdown (H1), Webhooks (H2), Timeline (H3), Censorship (H4),")
+print("               Satellite (H5), Chokepoints (H6), OONI (H7), Country Health (H8)")
+
+client_src5 = open("rir_client.py").read()
+sprint5_fns = [
+    "detect_shutdown", "register_shutdown_monitor", "get_shutdown_timeline",
+    "probe_dns_censorship", "get_satellite_connectivity",
+    "get_country_chokepoints", "get_ooni_report", "get_country_health",
+]
+for fn in sprint5_fns:
+    if f"async def {fn}" in client_src5:
+        print(f"   ✅ Sprint 5: rir_client.{fn} present")
+    else:
+        print(f"   ❌ Sprint 5: rir_client.{fn} MISSING")
+        errors.append(f"sprint5:fn:{fn}")
+
+from models import (
+    ShutdownDetectInput, ShutdownDetectResult,
+    MonitorRegisterInput, MonitorRegisterResult,
+    ShutdownTimelineInput, ShutdownTimelineResult,
+    CensorshipProbeInput, CensorshipProbeResult,
+    SatelliteConnectivityInput, SatelliteConnectivityResult,
+    ChokePointInput, ChokePointResult,
+    OONIReportInput, OONIReportResult,
+    CountryHealthInput, CountryHealthResult,
+)
+sprint5_models = [
+    "ShutdownDetectInput", "ShutdownDetectResult",
+    "MonitorRegisterInput", "MonitorRegisterResult",
+    "ShutdownTimelineInput", "ShutdownTimelineResult",
+    "CensorshipProbeInput", "CensorshipProbeResult",
+    "SatelliteConnectivityInput", "SatelliteConnectivityResult",
+    "ChokePointInput", "ChokePointResult",
+    "OONIReportInput", "OONIReportResult",
+    "CountryHealthInput", "CountryHealthResult",
+]
+for name in sprint5_models:
+    print(f"   ✅ Sprint 5: model {name} importable")
+
+from formatters import (
+    format_shutdown_detect_md, format_monitor_register_md,
+    format_shutdown_timeline_md, format_censorship_probe_md,
+    format_satellite_connectivity_md, format_chokepoints_md,
+    format_ooni_report_md, format_country_health_md,
+)
+for fn_name in ["format_shutdown_detect_md", "format_monitor_register_md",
+                "format_shutdown_timeline_md", "format_censorship_probe_md",
+                "format_satellite_connectivity_md", "format_chokepoints_md",
+                "format_ooni_report_md", "format_country_health_md"]:
+    print(f"   ✅ Sprint 5: formatter {fn_name} importable")
+
+server_src5 = open("server.py").read()
+sprint5_tools = [
+    "peerglass_shutdown_detect", "peerglass_monitor_register",
+    "peerglass_shutdown_timeline", "peerglass_dns_censorship",
+    "peerglass_satellite_connectivity", "peerglass_country_chokepoints",
+    "peerglass_ooni_report", "peerglass_country_health",
+]
+for tool in sprint5_tools:
+    if f'name="{tool}"' in server_src5:
+        print(f"   ✅ Sprint 5: MCP tool {tool} present")
+    else:
+        print(f"   ❌ Sprint 5: MCP tool {tool} MISSING")
+        errors.append(f"sprint5:mcp:{tool}")
+
+api_src5 = open("api.py").read()
+sprint5_routes = [
+    "/v1/shutdown/", "/v1/shutdown/monitor", "/v1/shutdown/timeline/",
+    "/v1/censorship/", "/v1/satellite/", "/v1/chokepoints/",
+    "/v1/ooni/", "/v1/health/country/",
+]
+for route in sprint5_routes:
+    if route in api_src5:
+        print(f"   ✅ Sprint 5: REST route {route} present")
+    else:
+        print(f"   ❌ Sprint 5: REST route {route} MISSING")
+        errors.append(f"sprint5:route:{route}")
+
+cache_src5 = open("cache.py").read()
+sprint5_ttls = [
+    "TTL_SHUTDOWN", "TTL_SHUTDOWN_TIMELINE", "TTL_CENSORSHIP",
+    "TTL_SATELLITE", "TTL_CHOKEPOINTS", "TTL_OONI", "TTL_COUNTRY_HEALTH",
+]
+for k in sprint5_ttls:
+    if k in cache_src5:
+        print(f"   ✅ Sprint 5: cache.{k} present")
+    else:
+        print(f"   ❌ Sprint 5: cache.{k} MISSING")
+        errors.append(f"sprint5:cache:{k}")
+
+
+# ── SECTION 16 — SPRINT 6 (D6, G2, I1, J1, J2, B3, B4, C2) ──
+print("\n16. SPRINT 6 — Advanced platform (D6, G2, I1, J1, J2, B3, B4, C2)")
+
+server_src6 = open("server.py").read()
+api_src6    = open("api.py").read()
+cache_src6  = open("cache.py").read()
+
+# D6 — AS Relationships
+if "rir_as_relationships" in server_src6:
+    print("   ✅ D6: MCP tool rir_as_relationships present")
+else:
+    print("   ❌ D6: MCP tool rir_as_relationships MISSING")
+    errors.append("sprint6:D6:mcp")
+
+if "/v1/as-relationships/" in api_src6:
+    print("   ✅ D6: REST /v1/as-relationships/{asn} present")
+else:
+    print("   ❌ D6: REST /v1/as-relationships/{asn} MISSING")
+    errors.append("sprint6:D6:rest")
+
+if "get_as_relationships" in open("rir_client.py").read():
+    print("   ✅ D6: rir_client.get_as_relationships present")
+else:
+    print("   ❌ D6: rir_client.get_as_relationships MISSING")
+    errors.append("sprint6:D6:client")
+
+# G2 — GeoIP
+if "peerglass_geo_lookup" in server_src6:
+    print("   ✅ G2: MCP tool peerglass_geo_lookup present")
+else:
+    print("   ❌ G2: MCP tool peerglass_geo_lookup MISSING")
+    errors.append("sprint6:G2:mcp")
+
+if "/v1/geo/" in api_src6:
+    print("   ✅ G2: REST /v1/geo/{ip} present")
+else:
+    print("   ❌ G2: REST /v1/geo/{ip} MISSING")
+    errors.append("sprint6:G2:rest")
+
+# I1 — RIPE Atlas Traceroute
+if "peerglass_atlas_trace" in server_src6:
+    print("   ✅ I1: MCP tool peerglass_atlas_trace present")
+else:
+    print("   ❌ I1: MCP tool peerglass_atlas_trace MISSING")
+    errors.append("sprint6:I1:mcp")
+
+if "/v1/atlas/" in api_src6:
+    print("   ✅ I1: REST /v1/atlas/{target} present")
+else:
+    print("   ❌ I1: REST /v1/atlas/{target} MISSING")
+    errors.append("sprint6:I1:rest")
+
+# J1 — MCP Resources
+if 'peerglass://rir-status' in server_src6 and 'peerglass://ipv4-exhaustion' in server_src6:
+    print("   ✅ J1: MCP resources peerglass://rir-status and peerglass://ipv4-exhaustion present")
+else:
+    print("   ❌ J1: MCP resources missing")
+    errors.append("sprint6:J1:resources")
+
+# J2 — Bulk endpoint
+if "/v1/bulk" in api_src6 and "_BulkRequest" in api_src6:
+    print("   ✅ J2: POST /v1/bulk endpoint present")
+else:
+    print("   ❌ J2: POST /v1/bulk endpoint MISSING")
+    errors.append("sprint6:J2:bulk")
+
+# B3 — config.py
+import importlib.util
+spec = importlib.util.spec_from_file_location("config", "config.py")
+if spec:
+    try:
+        cfg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cfg)
+        assert hasattr(cfg, "get_int") and hasattr(cfg, "get_str")
+        assert hasattr(cfg, "GEOIP_DB") and hasattr(cfg, "ATLAS_API_KEY")
+        print("   ✅ B3: config.py importable, get_int/get_str/GEOIP_DB/ATLAS_API_KEY present")
+    except Exception as e:
+        print(f"   ❌ B3: config.py error: {e}")
+        errors.append(f"sprint6:B3:{e}")
+else:
+    print("   ❌ B3: config.py not found")
+    errors.append("sprint6:B3:missing")
+
+# B4 — logging_config.py
+spec4 = importlib.util.spec_from_file_location("logging_config", "logging_config.py")
+if spec4:
+    try:
+        lc = importlib.util.module_from_spec(spec4)
+        spec4.loader.exec_module(lc)
+        assert hasattr(lc, "get_logger")
+        logger = lc.get_logger("test.sprint6")
+        assert logger is not None
+        print("   ✅ B4: logging_config.py importable, get_logger works")
+    except Exception as e:
+        print(f"   ❌ B4: logging_config.py error: {e}")
+        errors.append(f"sprint6:B4:{e}")
+else:
+    print("   ❌ B4: logging_config.py not found")
+    errors.append("sprint6:B4:missing")
+
+# C2 — scripts/export_schema.py
+import os as _os
+if _os.path.exists("scripts/export_schema.py") and _os.path.exists("scripts/__init__.py"):
+    print("   ✅ C2: scripts/export_schema.py and scripts/__init__.py present")
+else:
+    print("   ❌ C2: scripts/export_schema.py or __init__.py MISSING")
+    errors.append("sprint6:C2:missing")
+
+# Cache TTLs for Sprint 6
+sprint6_ttls = ["TTL_AS_RELATIONSHIPS", "TTL_GEO_LOOKUP", "TTL_ATLAS_TRACE"]
+for k in sprint6_ttls:
+    if k in cache_src6:
+        print(f"   ✅ Sprint 6: cache.{k} present")
+    else:
+        print(f"   ❌ Sprint 6: cache.{k} MISSING")
+        errors.append(f"sprint6:cache:{k}")
+
+# Sprint 6 models importable
+try:
+    from models import (
+        ASRelationshipInput, ASRelationship, ASRelationshipResult,
+        GeoLookupInput, GeoIPResult,
+        AtlasTraceInput, AtlasHop, AtlasProbeResult, AtlasTraceResult,
+    )
+    r = ASRelationshipResult(asn="AS13335", total_relationships=0)
+    g = GeoIPResult(ip="1.1.1.1", available=True)
+    t = AtlasTraceResult(target="1.1.1.1", probes_requested=5)
+    print("   ✅ Sprint 6: all Sprint 6 Pydantic models importable and instantiable")
+except Exception as e:
+    print(f"   ❌ Sprint 6: models error: {e}")
+    errors.append(f"sprint6:models:{e}")
+
+# Sprint 6 formatters importable
+try:
+    from formatters import format_as_relationships_md, format_geo_lookup_md, format_atlas_trace_md
+    from models import ASRelationshipResult, GeoIPResult, AtlasTraceResult
+    md1 = format_as_relationships_md(ASRelationshipResult(asn="AS13335"))
+    md2 = format_geo_lookup_md(GeoIPResult(ip="1.1.1.1"))
+    md3 = format_atlas_trace_md(AtlasTraceResult(target="1.1.1.1", probes_requested=5))
+    assert "AS13335" in md1 and "1.1.1.1" in md2 and "1.1.1.1" in md3
+    print("   ✅ Sprint 6: Sprint 6 formatters importable and produce output")
+except Exception as e:
+    print(f"   ❌ Sprint 6: formatters error: {e}")
+    errors.append(f"sprint6:formatters:{e}")
+
+
 # ── SUMMARY ──────────────────────────────────────────────────
 print()
 print("=" * 60)
@@ -592,8 +838,9 @@ if not errors:
     print("✅ ALL TESTS PASSED — 0 errors")
     print()
     print("  Python files:         7  (all compile clean)")
-    print("  MCP tools:            31")
-    print("  REST endpoints:       29")
+    print("  MCP tools:            42")
+    print("  REST endpoints:       41")
+    print("  MCP resources:        2")
     print("  Protocol:             RDAP throughout (RFC 7480-7484)")
     print("  Branding:             PeerGlass throughout")
     print("  historical-whois:     correctly attributed to RIPE Stat API naming")
