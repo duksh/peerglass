@@ -54,26 +54,7 @@ services:
 
     autoDeploy: true                    # redeploy on every push to branch
 
-  # ── Web UI (Sprint 7 — React + Vite) ────────────────────────
-  - type: web
-    name: peerglass-ui
-    runtime: static
-    plan: free                          # static sites never sleep on Render
-    branch: main
-    buildCommand: cd ui && npm ci && npm run build
-    staticPublishPath: ui/dist
-    pullRequestPreviewsEnabled: true
-    envVars:
-      - key: VITE_API_BASE_URL
-        value: https://peerglass-api.onrender.com
-    headers:
-      - path: /*
-        name: X-Frame-Options
-        value: DENY
-      - path: /*
-        name: X-Content-Type-Options
-        value: nosniff
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html        # SPA fallback for client-side routing
+  # ── Web UI ───────────────────────────────────────────────────
+  # Hosted on GitHub Pages at https://duksh.github.io/peerglass/
+  # Deployed automatically via .github/workflows/deploy-ui.yml on push to main.
+  # No Render service needed for the UI.
