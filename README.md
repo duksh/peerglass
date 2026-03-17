@@ -73,7 +73,7 @@ If `peerglass` is not in your PATH, use:
 }
 ```
 
-Restart Claude Desktop. All **27 tools** become immediately available.
+Restart Claude Desktop. All **31 tools** become immediately available.
 
 ### Start the REST API
 
@@ -138,7 +138,7 @@ Interactive docs at: http://localhost:8000/docs
 
 ---
 
-## All 27 MCP Tools
+## All 31 MCP Tools
 
 ### Phase 1 — Registry Queries
 
@@ -297,7 +297,7 @@ Interactive docs (Swagger UI): http://localhost:8000/docs
 │   Claude (LLM)              REST Clients                │
 │       │ MCP / stdio              │ HTTP                 │
 │       ▼                          ▼                      │
-│   server.py (27 tools)      api.py (25 endpoints)       │
+│   server.py (31 tools)      api.py (25 endpoints)       │
 │       │                          │                      │
 │       └──────────┬───────────────┘                      │
 │                  ▼                                       │
@@ -377,7 +377,7 @@ You should run both — they catch different categories of problems.
 | 7 | Tool count | Exactly 27 `@mcp.tool()` decorators in `server.py` |
 | 8 | REST endpoints | All 25 routes present in `api.py` |
 | 9 | FastAPI runtime | TestClient hits 3 endpoints in-memory, validates responses |
-| 10 | README | PeerGlass branding, 27 tools, RDAP note all present |
+| 10 | README | PeerGlass branding, 31 tools, RDAP note all present |
 
 **How to run:**
 
@@ -402,7 +402,7 @@ PEERGLASS — COMPLETE TEST SUITE
 ...
 
 ✅ ALL TESTS PASSED — 0 errors
-  Python files: 7  |  MCP tools: 27  |  REST endpoints: 25
+  Python files: 7  |  MCP tools: 31  |  REST endpoints: 29
   Protocol: RDAP throughout (RFC 7480-7484)
   Branding: PeerGlass throughout
 ============================================================

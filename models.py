@@ -1001,6 +1001,102 @@ class ThreatIntelResult(BaseModel):
 
 # ── E6: Passive DNS ─────────────────────────────────────────
 
+# ── Sprint 4 — BGP Depth ─────────────────────────────────────
+
+class IRRCheckInput(BaseModel):
+    """D1: IRR route-object consistency check."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    prefix: str = Field(min_length=7, max_length=50, description="CIDR prefix e.g. 1.1.1.0/24")
+    asn: str    = Field(min_length=1, max_length=20, description="ASN e.g. AS13335 or 13335")
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class IRRRouteObject(BaseModel):
+    irr_source:       str
+    route:            str
+    origin_asn:       str
+    matches_query_asn: bool = False
+
+class IRRResult(BaseModel):
+    prefix:              str
+    asn:                 str
+    route_objects:       List[IRRRouteObject] = Field(default_factory=list)
+    consistent:          bool                 = False
+    irr_sources_found:   List[str]            = Field(default_factory=list)
+    missing_irr_sources: List[str]            = Field(default_factory=list)
+    errors:              List[str]            = Field(default_factory=list)
+
+
+class RouteLeakInput(BaseModel):
+    """D3: BGP route-leak / hijack detection."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    prefix: str = Field(min_length=7, max_length=50)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class RouteLeakPath(BaseModel):
+    suspect_asn: str
+    as_path:     List[str] = Field(default_factory=list)
+    collector:   Optional[str] = None
+
+class RouteLeakResult(BaseModel):
+    prefix:          str
+    leak_detected:   bool              = False
+    confidence:      str               = "none"   # high | medium | low | none
+    suspect_asns:    List[str]         = Field(default_factory=list)
+    affected_paths:  List[RouteLeakPath] = Field(default_factory=list)
+    origin_asns:     List[str]         = Field(default_factory=list)
+    source:          str               = "RIPE Stat BGP State"
+    errors:          List[str]         = Field(default_factory=list)
+
+
+class LookingGlassInput(BaseModel):
+    """D4: BGP looking-glass — AS paths from RIPE RIS collectors."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    prefix:         str = Field(min_length=7, max_length=50)
+    vantage_points: int = Field(default=10, ge=1, le=50)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class LookingGlassEntry(BaseModel):
+    collector:   str
+    peer_asn:    str
+    as_path:     List[str] = Field(default_factory=list)
+    communities: List[str] = Field(default_factory=list)
+    region:      Optional[str] = None
+
+class LookingGlassResult(BaseModel):
+    prefix:          str
+    entries:         List[LookingGlassEntry] = Field(default_factory=list)
+    unique_as_paths: int  = 0
+    queried_at:      str  = ""
+    source:          str  = "RIPE Stat BGP State"
+    errors:          List[str] = Field(default_factory=list)
+
+
+class RouteStabilityInput(BaseModel):
+    """D5: Route flap / stability analysis."""
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    prefix: str = Field(min_length=7, max_length=50)
+    hours:  int = Field(default=24, ge=1, le=168)
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN
+
+class RouteEvent(BaseModel):
+    timestamp:  str
+    event_type: str             # announced | withdrawn
+    peer_count: Optional[int] = None
+
+class RouteStabilityResult(BaseModel):
+    prefix:          str
+    hours_analyzed:  int
+    stability_score: float = 100.0   # 0 (unstable) to 100 (perfect)
+    state_changes:   int   = 0
+    uptime_pct:      float = 100.0
+    is_stable:       bool  = True
+    events:          List[RouteEvent] = Field(default_factory=list)
+    source:          str   = "RIPE Stat Routing History"
+    errors:          List[str] = Field(default_factory=list)
+
+
+# ── E6: Passive DNS ─────────────────────────────────────────
+
 class PassiveDNSInput(BaseModel):
     resource: str
     limit: int = Field(default=100, ge=1, le=500)

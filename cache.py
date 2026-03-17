@@ -53,6 +53,12 @@ TTL_CT_LOGS      = 86_400    # 24 hours   — CT log history is append-only
 TTL_THREAT_INTEL = 3_600     # 1 hour     — Shodan/GreyNoise refreshes hourly
 TTL_PASSIVE_DNS  = 86_400    # 24 hours   — PDNS history rarely changes
 
+# Sprint 4 — BGP depth
+TTL_IRR              = 3_600   # 1 hour     — IRR route objects are fairly stable
+TTL_ROUTE_LEAK       = 300     # 5 minutes  — BGP state can shift quickly
+TTL_LOOKING_GLASS    = 300     # 5 minutes  — live routing table snapshots
+TTL_ROUTE_STABILITY  = 900     # 15 minutes — stability window is time-sensitive
+
 # ── In-memory store ─────────────────────────────────────────
 _STORE: dict[str, tuple[Any, float]] = {}
 
@@ -164,6 +170,19 @@ def make_threat_intel_key(ip: str) -> str:
 
 def make_passive_dns_key(resource: str) -> str:
     return _make_key("passive_dns", resource.lower().strip())
+
+# Sprint 4 — BGP depth
+def make_irr_key(prefix: str, asn: str) -> str:
+    return _make_key("irr", prefix.strip(), asn.upper().lstrip("AS"))
+
+def make_route_leak_key(prefix: str) -> str:
+    return _make_key("route_leak", prefix.strip())
+
+def make_looking_glass_key(prefix: str, vantage_points: int) -> str:
+    return _make_key("looking_glass", prefix.strip(), int(vantage_points))
+
+def make_route_stability_key(prefix: str, hours: int) -> str:
+    return _make_key("route_stability", prefix.strip(), int(hours))
 
 
 # ── Monitor Store — persistent baselines for change detection ──

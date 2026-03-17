@@ -1407,3 +1407,160 @@ def format_passive_dns_md(result: PassiveDNSResult) -> str:
         lines.append("> No passive DNS records found for this resource.\n\n")
 
     return "".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────
+# Sprint 4 — BGP Depth formatters
+# ──────────────────────────────────────────────────────────────
+
+def format_irr_result_md(result) -> str:
+    from models import IRRResult
+    lines = []
+    icon = "✅" if result.consistent else ("⚠️" if result.route_objects else "❌")
+    lines.append(f"## {icon} IRR Validation — `{result.prefix}` (origin {result.asn})\n\n")
+
+    status = "Consistent — all route objects match query ASN" if result.consistent else (
+        "Inconsistent — route objects do not all match query ASN" if result.route_objects
+        else "No route objects found in any IRR database"
+    )
+    lines.append(f"**Status:** {status}\n\n")
+
+    if result.irr_sources_found:
+        lines.append(f"- **IRR sources with objects:** {', '.join(result.irr_sources_found)}\n")
+    if result.missing_irr_sources:
+        lines.append(f"- **Not found in:** {', '.join(result.missing_irr_sources)}\n")
+    lines.append("\n")
+
+    if result.route_objects:
+        lines.append("### Route Objects\n\n")
+        lines.append("| IRR Source | Route | Origin ASN | Matches? |\n")
+        lines.append("|-----------|-------|-----------|----------|\n")
+        for obj in result.route_objects[:30]:
+            match_icon = "✅" if obj.matches_query_asn else "❌"
+            lines.append(f"| {obj.irr_source} | `{obj.route}` | {obj.origin_asn} | {match_icon} |\n")
+        if len(result.route_objects) > 30:
+            lines.append(f"\n*…{len(result.route_objects) - 30} more route objects not shown.*\n")
+        lines.append("\n")
+
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+
+    lines.append(
+        "> **Note:** IRR (Internet Routing Registry) route objects tell ISPs which ASN is "
+        "authorised to announce a prefix. Inconsistent or missing objects can cause route "
+        "filtering and prefix reachability issues.\n"
+    )
+    return "".join(lines)
+
+
+def format_route_leak_md(result) -> str:
+    CONF_ICONS = {"high": "🚨", "medium": "⚠️", "low": "🟡", "none": "✅"}
+    icon = CONF_ICONS.get(result.confidence, "❓")
+    lines = []
+    lines.append(f"## {icon} Route Leak Detection — `{result.prefix}`\n\n")
+    lines.append(f"- **Leak detected:** {'Yes' if result.leak_detected else 'No'}\n")
+    lines.append(f"- **Confidence:** {result.confidence.upper()}\n")
+    if result.origin_asns:
+        lines.append(f"- **Origin ASNs seen:** {', '.join(result.origin_asns)}\n")
+    lines.append(f"- **Source:** {result.source}\n\n")
+
+    if result.suspect_asns:
+        lines.append(f"**Suspect ASNs:** {', '.join(result.suspect_asns)}\n\n")
+
+    if result.affected_paths:
+        lines.append("### Anomalous AS Paths\n\n")
+        lines.append("| Suspect ASN | Collector | AS Path |\n")
+        lines.append("|-------------|-----------|--------|\n")
+        for path in result.affected_paths[:10]:
+            as_path_str = " → ".join(path.as_path) if path.as_path else "—"
+            collector   = path.collector or "—"
+            lines.append(f"| {path.suspect_asn} | {collector} | `{as_path_str[:80]}` |\n")
+        lines.append("\n")
+    else:
+        lines.append("> No anomalous AS paths detected.\n\n")
+
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+
+    lines.append(
+        "> **Note:** Route leaks occur when an ASN re-announces routes it received from an "
+        "upstream to another upstream (valley-free violation). This analysis checks for "
+        "AS-path loops and multiple origin ASNs — cross-reference with RPKI for confirmation.\n"
+    )
+    return "".join(lines)
+
+
+def format_looking_glass_md(result) -> str:
+    lines = []
+    announced = bool(result.entries)
+    icon = "📡" if announced else "🔇"
+    lines.append(f"## {icon} BGP Looking Glass — `{result.prefix}`\n\n")
+    lines.append(f"- **Unique AS paths:** {result.unique_as_paths}\n")
+    lines.append(f"- **Vantage points shown:** {len(result.entries)}\n")
+    if result.queried_at:
+        lines.append(f"- **Queried at:** {result.queried_at}\n")
+    lines.append(f"- **Source:** {result.source}\n\n")
+
+    if result.entries:
+        lines.append("### AS Paths by Vantage Point\n\n")
+        lines.append("| Collector | Region | Peer ASN | AS Path | Communities |\n")
+        lines.append("|-----------|--------|----------|---------|-------------|\n")
+        for entry in result.entries:
+            as_path_str = " → ".join(entry.as_path) if entry.as_path else "—"
+            comms_str   = ", ".join(entry.communities) if entry.communities else "—"
+            region      = entry.region or "—"
+            lines.append(
+                f"| {entry.collector} | {region} | AS{entry.peer_asn} "
+                f"| `{as_path_str[:60]}` | {comms_str[:40]} |\n"
+            )
+        lines.append("\n")
+    else:
+        lines.append("> No routing table entries found for this prefix.\n\n")
+
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+
+    return "".join(lines)
+
+
+def format_route_stability_md(result) -> str:
+    score = result.stability_score
+    if score >= 90:
+        score_icon = "🟢"
+    elif score >= 60:
+        score_icon = "🟡"
+    else:
+        score_icon = "🔴"
+
+    lines = []
+    lines.append(f"## {score_icon} Route Stability — `{result.prefix}`\n\n")
+    lines.append(f"- **Stability score:** {score_icon} {result.stability_score}/100\n")
+    lines.append(f"- **State changes:** {result.state_changes}\n")
+    lines.append(f"- **Uptime:** {result.uptime_pct}%\n")
+    lines.append(f"- **Stable:** {'Yes' if result.is_stable else 'No (>2 state changes)'}\n")
+    lines.append(f"- **Window analysed:** last {result.hours_analyzed} hour(s)\n")
+    lines.append(f"- **Source:** {result.source}\n\n")
+
+    if result.events:
+        lines.append("### Route Events (most recent 20)\n\n")
+        lines.append("| Timestamp | Event |\n")
+        lines.append("|-----------|-------|\n")
+        for ev in result.events[-20:]:
+            ev_icon = "📡" if ev.event_type == "announced" else "🔇"
+            lines.append(f"| {ev.timestamp[:19]} | {ev_icon} {ev.event_type.title()} |\n")
+        lines.append("\n")
+    else:
+        lines.append("> No state-change events found in this window (route appears stable).\n\n")
+
+    if result.errors:
+        for e in result.errors:
+            lines.append(f"> ⚠️ {e}\n")
+        lines.append("\n")
+
+    return "".join(lines)
