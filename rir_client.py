@@ -97,9 +97,10 @@ PEERINGDB_NETIXLAN_URL = "https://www.peeringdb.com/api/netixlan"
 RIPE_STAT_NEIGHBOURS_URL = "https://stat.ripe.net/data/asn-neighbours/data.json"
 
 DEFAULT_TIMEOUT = 15.0
+_USER_AGENT = "peerglass/1.0.0 (PeerGlass RDAP+BGP+RPKI client; educational/research use)"
 DEFAULT_HEADERS = {
     "Accept":     "application/rdap+json, application/json",
-    "User-Agent": "peerglass/1.0.0 (PeerGlass RDAP+BGP+RPKI client; educational/research use)",
+    "User-Agent": _USER_AGENT,
 }
 
 # Bootstrap data is cached with a 24-hour TTL so long-running servers
