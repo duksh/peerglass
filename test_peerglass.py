@@ -216,6 +216,123 @@ for term, desc in must_not_contain:
         errors.append(f"readme:found:{term}")
 
 
+# ── 11. SPRINT 1 — NEW FEATURES ──────────────────────────────
+print("\n11. SPRINT 1 FEATURES — A1, A2, B1, B2, D2, J3")
+
+# A1: IPv6 CIDR helpers exist
+client_src2 = open("rir_client.py").read()
+if "_ip6_to_int" in client_src2 and "_cidr_contains_ip6" in client_src2:
+    print("   ✅ A1: IPv6 bootstrap helpers (_ip6_to_int, _cidr_contains_ip6)")
+else:
+    print("   ❌ A1: IPv6 bootstrap helpers missing")
+    errors.append("sprint1:A1")
+
+# A2: Bootstrap TTL constant present
+if "BOOTSTRAP_TTL" in client_src2 and "86_400" in client_src2:
+    print("   ✅ A2: Bootstrap 24h TTL (BOOTSTRAP_TTL = 86_400)")
+else:
+    print("   ❌ A2: BOOTSTRAP_TTL constant missing")
+    errors.append("sprint1:A2")
+
+# A2: Cache stores timestamps (tuple not bare dict)
+if "_BOOTSTRAP_CACHE: dict[str, tuple[dict, float]]" in client_src2:
+    print("   ✅ A2: Bootstrap cache uses (data, timestamp) tuples")
+else:
+    print("   ❌ A2: Bootstrap cache timestamp structure missing")
+    errors.append("sprint1:A2:cache_type")
+
+# B1: slowapi imported and limiter applied
+api_src2 = open("api.py").read()
+if "from slowapi import Limiter" in api_src2 and "limiter = Limiter(" in api_src2:
+    print("   ✅ B1: slowapi Limiter present in api.py")
+else:
+    print("   ❌ B1: slowapi rate limiter missing")
+    errors.append("sprint1:B1")
+
+if "@limiter.limit" in api_src2:
+    limit_count = api_src2.count("@limiter.limit")
+    print(f"   ✅ B1: {limit_count} @limiter.limit decorators applied")
+else:
+    print("   ❌ B1: no @limiter.limit decorators found")
+    errors.append("sprint1:B1:decorators")
+
+# B2: CORS env var
+if "PEERGLASS_ALLOWED_ORIGINS" in api_src2:
+    print("   ✅ B2: CORS origins via PEERGLASS_ALLOWED_ORIGINS env var")
+else:
+    print("   ❌ B2: CORS env var missing")
+    errors.append("sprint1:B2")
+
+# D2: BGPCommunity model and BGP_WELL_KNOWN_COMMUNITIES dict
+models_src2 = open("models.py").read()
+if "class BGPCommunity" in models_src2 and "BGP_WELL_KNOWN_COMMUNITIES" in models_src2:
+    print("   ✅ D2: BGPCommunity model and well-known community map present")
+else:
+    print("   ❌ D2: BGPCommunity model missing")
+    errors.append("sprint1:D2:model")
+
+if "communities: List[BGPCommunity]" in models_src2:
+    print("   ✅ D2: BGPStatusResult.communities field present")
+else:
+    print("   ❌ D2: BGPStatusResult.communities field missing")
+    errors.append("sprint1:D2:field")
+
+# D2: Communities parsed in rir_client and rendered in formatters
+if "communities_seen" in client_src2 and "entry.get(\"community\"" in client_src2:
+    print("   ✅ D2: Communities parsed from bgp-state response")
+else:
+    print("   ❌ D2: Community parsing missing in rir_client.py")
+    errors.append("sprint1:D2:parsing")
+
+# J3: WHOIS fallback function present
+if "async def get_whois_fallback" in client_src2 and "async def _whois_query" in client_src2:
+    print("   ✅ J3: WHOIS fallback (_whois_query, get_whois_fallback) present")
+else:
+    print("   ❌ J3: WHOIS fallback functions missing")
+    errors.append("sprint1:J3")
+
+if "get_whois_fallback" in api_src2:
+    print("   ✅ J3: WHOIS fallback wired into /v1/ip and /v1/asn endpoints")
+else:
+    print("   ❌ J3: WHOIS fallback not wired into API endpoints")
+    errors.append("sprint1:J3:wired")
+
+# D2 model import round-trip
+try:
+    from models import BGPCommunity, BGP_WELL_KNOWN_COMMUNITIES, BGPStatusResult
+    c = BGPCommunity(asn=65535, value=666, description="BLACKHOLE")
+    assert c.asn == 65535
+    assert c.value == 666
+    key = (65535, 666)
+    assert key in BGP_WELL_KNOWN_COMMUNITIES, "Blackhole community missing from map"
+    result = BGPStatusResult(
+        resource="1.1.1.0/24",
+        resource_type="prefix",
+        is_announced=True,
+        communities=[c],
+    )
+    assert len(result.communities) == 1
+    print("   ✅ D2: BGPCommunity model serializes and round-trips correctly")
+except Exception as e:
+    print(f"   ❌ D2: Model round-trip failed: {e}")
+    errors.append(f"sprint1:D2:roundtrip:{e}")
+
+# A1 logic test — basic IPv6 CIDR matching
+try:
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from rir_client import _ip6_to_int, _cidr_contains_ip6
+
+    google_dns_v6 = "2001:4860:4860::8888"
+    google_block  = "2001:4860::/32"
+    ip_int = _ip6_to_int(google_dns_v6)
+    assert _cidr_contains_ip6(google_block, ip_int), "Google IPv6 should be in 2001:4860::/32"
+    assert not _cidr_contains_ip6("2606:4700::/32", ip_int), "Google IPv6 should not be in Cloudflare block"
+    print("   ✅ A1: IPv6 CIDR matching logic correct")
+except Exception as e:
+    print(f"   ❌ A1: IPv6 CIDR matching failed: {e}")
+    errors.append(f"sprint1:A1:logic:{e}")
+
 # ── SUMMARY ──────────────────────────────────────────────────
 print()
 print("=" * 60)

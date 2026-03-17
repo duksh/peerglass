@@ -319,6 +319,16 @@ def format_bgp_status_md(result: BGPStatusResult) -> str:
         if len(result.announced_prefixes) > 20:
             lines.append(f"\n_…and {len(result.announced_prefixes) - 20} more prefixes. Use JSON format for full list._\n")
 
+    if getattr(result, "communities", None):
+        lines.append(f"\n### BGP Communities ({len(result.communities)} unique)\n\n")
+        lines.append("| ASN | Value | Description |\n")
+        lines.append("|-----|-------|-------------|\n")
+        for c in result.communities[:20]:
+            desc = c.description or "—"
+            lines.append(f"| {c.asn} | {c.value} | {desc} |\n")
+        if len(result.communities) > 20:
+            lines.append(f"\n_…and {len(result.communities) - 20} more. Use JSON format for full list._\n")
+
     if not result.is_announced:
         lines.append(
             "\n> ⚠️ This resource has no active BGP announcements. "
