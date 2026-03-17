@@ -496,7 +496,7 @@ async def test_crisis(client: httpx.AsyncClient):
     # Shutdown monitor — POST
     r = await post(client, "/v1/shutdown/monitor", {
         "resource": "UA", "threshold": 20, "interval_minutes": 60,
-        "notify_url": "https://example.com/hook"
+        "webhook_url": "https://example.com/hook"
     })
     if r is not None and r.status_code in (200, 201):
         ok("Shutdown monitor POST returns 200/201")
@@ -808,14 +808,20 @@ async def test_cors(client: httpx.AsyncClient):
     else:
         fail("Access-Control-Allow-Origin missing or wrong", repr(acao))
 
-    # Regular GET from browser origin
-    r = await get(client, "/v1/ip/1.1.1.1")
-    if r:
+    # Regular GET from browser origin — must include Origin header to trigger CORS
+    try:
+        r = await client.get(
+            f"{BASE}/v1/ip/1.1.1.1",
+            headers={"Origin": "https://duksh.github.io"},
+            timeout=TIMEOUT,
+        )
         acao = r.headers.get("access-control-allow-origin", "")
         if acao:
             ok("GET response includes CORS header", acao)
         else:
             fail("GET response missing Access-Control-Allow-Origin")
+    except Exception as e:
+        skip("GET CORS header check", str(e))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
