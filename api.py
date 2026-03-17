@@ -94,6 +94,10 @@ from formatters import (
     format_ct_logs_md,
     format_threat_intel_md,
     format_passive_dns_md,
+    format_irr_result_md,
+    format_route_leak_md,
+    format_looking_glass_md,
+    format_route_stability_md,
     to_json,
 )
 from normalizer import normalize_ip_response, normalize_asn_response
@@ -185,7 +189,7 @@ async def root():
         "description": "Internet resource intelligence: RIR + BGP + RPKI + PeeringDB",
         "docs": "/docs",
         "redoc": "/redoc",
-        "tools": 27,
+        "tools": 31,
         "endpoints": {
             "ip":              "/v1/ip/{ip}",
             "asn":             "/v1/asn/{asn}",
@@ -212,6 +216,10 @@ async def root():
             "ct_logs":         "/v1/ct/{domain}",
             "threat_intel":    "/v1/threat/{ip}",
             "passive_dns":     "/v1/pdns/{resource}",
+            "irr":             "/v1/irr?prefix=...&asn=...",
+            "route_leak":      "/v1/route-leak/{prefix}",
+            "looking_glass":   "/v1/looking-glass/{prefix}",
+            "route_stability": "/v1/stability/{prefix}",
             "cache_stats":     "/v1/meta/cache",
             "server_status":   "/v1/meta/status",
         },
@@ -1090,6 +1098,105 @@ async def passive_dns(
 
 
 # ──────────────────────────────────────────────────────────────
+# Sprint 4 — BGP Depth endpoints
+# ──────────────────────────────────────────────────────────────
+
+@app.get(
+    "/v1/irr",
+    tags=["BGP"],
+    summary="IRR route-object consistency check",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def check_irr_endpoint(
+    request: Request,
+    prefix: str = Query(..., description="CIDR prefix e.g. 1.1.1.0/24"),
+    asn: str    = Query(..., description="Origin ASN e.g. AS13335 or 13335"),
+    format: str = FORMAT_QUERY,
+):
+    """Check IRRExplorer for route objects covering *prefix* and validate against *asn*."""
+    cache_key = cache_module.make_irr_key(prefix, asn)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.check_irr(prefix, asn)
+    md  = format_irr_result_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_IRR)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/route-leak/{prefix:path}",
+    tags=["BGP"],
+    summary="BGP route leak / hijack detection",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def detect_route_leak_endpoint(
+    request: Request,
+    prefix: str,
+    format: str = FORMAT_QUERY,
+):
+    """Detect potential route leaks or hijacks for a prefix using RIPE Stat BGP-state."""
+    cache_key = cache_module.make_route_leak_key(prefix)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.detect_route_leak(prefix)
+    md  = format_route_leak_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_ROUTE_LEAK)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/looking-glass/{prefix:path}",
+    tags=["BGP"],
+    summary="BGP looking glass — AS paths from RIPE RIS collectors",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def looking_glass_endpoint(
+    request: Request,
+    prefix: str,
+    vantage_points: int = Query(default=10, ge=1, le=50, description="Max entries to return"),
+    format: str = FORMAT_QUERY,
+):
+    """Show BGP routing table entries with full AS paths from RIPE RIS vantage points."""
+    cache_key = cache_module.make_looking_glass_key(prefix, vantage_points)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_looking_glass(prefix, vantage_points)
+    md  = format_looking_glass_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_LOOKING_GLASS)
+    return _resp(md, jsn, format)
+
+
+@app.get(
+    "/v1/stability/{prefix:path}",
+    tags=["BGP"],
+    summary="BGP route stability / flap analysis",
+)
+@limiter.limit(_DEFAULT_RATE)
+async def route_stability_endpoint(
+    request: Request,
+    prefix: str,
+    hours: int = Query(default=24, ge=1, le=168, description="Analysis window in hours (max 168 = 7 days)"),
+    format: str = FORMAT_QUERY,
+):
+    """Analyse BGP route flap history and compute a stability score for a prefix."""
+    cache_key = cache_module.make_route_stability_key(prefix, hours)
+    cached    = cache_module.get(cache_key)
+    if cached:
+        return _resp(cached["markdown"], cached["json"], format)
+    result = await rir_client.get_route_stability(prefix, hours)
+    md  = format_route_stability_md(result)
+    jsn = to_json(result)
+    cache_module.set(cache_key, {"markdown": md, "json": jsn}, cache_module.TTL_ROUTE_STABILITY)
+    return _resp(md, jsn, format)
+
+
+# ──────────────────────────────────────────────────────────────
 # OpenAI / Gemini function-calling schema endpoint
 # ──────────────────────────────────────────────────────────────
 
@@ -1372,6 +1479,65 @@ async def openai_tools(request: Request):
                         "limit": {"type": "integer", "description": "Max records (default 100)"},
                     },
                     "required": ["resource"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rir_check_irr",
+                "description": "IRR route-object consistency check via IRRExplorer — validates that a prefix has correct route objects matching the expected origin ASN.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prefix": {"type": "string", "description": "CIDR prefix e.g. 1.1.1.0/24"},
+                        "asn":    {"type": "string", "description": "Expected origin ASN e.g. AS13335"},
+                    },
+                    "required": ["prefix", "asn"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rir_detect_route_leak",
+                "description": "Detect BGP route leaks or hijacks — checks for multiple origin ASNs and AS-path loops.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prefix": {"type": "string", "description": "CIDR prefix e.g. 1.1.1.0/24"},
+                    },
+                    "required": ["prefix"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rir_looking_glass",
+                "description": "BGP looking glass — shows AS paths and communities from RIPE RIS vantage points around the world.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prefix":         {"type": "string",  "description": "CIDR prefix e.g. 1.1.1.0/24"},
+                        "vantage_points": {"type": "integer", "description": "Max entries (default 10)"},
+                    },
+                    "required": ["prefix"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rir_route_stability",
+                "description": "BGP route stability / flap analysis — computes a 0–100 stability score and lists state-change events.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prefix": {"type": "string",  "description": "CIDR prefix e.g. 1.1.1.0/24"},
+                        "hours":  {"type": "integer", "description": "Analysis window in hours (default 24, max 168)"},
+                    },
+                    "required": ["prefix"],
                 },
             },
         },

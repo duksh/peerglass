@@ -52,6 +52,10 @@ from models import (
     CTLogInput,
     ThreatIntelInput,
     PassiveDNSInput,
+    IRRCheckInput,
+    RouteLeakInput,
+    LookingGlassInput,
+    RouteStabilityInput,
 )
 from normalizer import (
     normalize_ip_response,
@@ -84,6 +88,10 @@ from formatters import (
     format_ct_logs_md,
     format_threat_intel_md,
     format_passive_dns_md,
+    format_irr_result_md,
+    format_route_leak_md,
+    format_looking_glass_md,
+    format_route_stability_md,
     to_json,
 )
 
@@ -123,6 +131,10 @@ Power workflows:
   M&A due dilig.: rir_audit_org → rir_prefix_history → rir_detect_transfers
   NOC incident:   rir_network_health → rir_get_abuse_contact → rir_peering_info
   Ongoing watch:  rir_change_monitor (call repeatedly to detect drift)
+  IRR coverage?   → rir_check_irr
+  Route leak?     → rir_detect_route_leak
+  AS paths?       → rir_looking_glass
+  Route stable?   → rir_route_stability
 """,
 )
 
@@ -1624,6 +1636,157 @@ async def peerglass_passive_dns(params: PassiveDNSInput) -> str:
     """
     result = await rir_client.passive_dns(params)
     md  = format_passive_dns_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 28 — IRR Validation  [Sprint 4 / D1]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="rir_check_irr",
+    annotations={
+        "title":           "IRR Route-Object Consistency Check",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def rir_check_irr(params: IRRCheckInput) -> str:
+    """
+    Check IRRExplorer for route objects covering a prefix and verify they
+    are consistent with the claimed origin ASN.
+
+    IRR (Internet Routing Registry) route objects tell ISPs which ASN is
+    authorised to originate a prefix.  Inconsistent or missing route objects
+    can cause route filtering and reachability issues even when RPKI is valid.
+
+    Args:
+        params (IRRCheckInput):
+            - prefix (str): CIDR prefix e.g. '1.1.1.0/24'
+            - asn (str): Expected origin ASN e.g. 'AS13335' or '13335'
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Route objects per IRR source, consistency status, and missing IRR coverage.
+    """
+    result = await rir_client.check_irr(params.prefix, params.asn)
+    md  = format_irr_result_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 29 — Route Leak Detection  [Sprint 4 / D3]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="rir_detect_route_leak",
+    annotations={
+        "title":           "BGP Route Leak / Hijack Detection",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def rir_detect_route_leak(params: RouteLeakInput) -> str:
+    """
+    Detect potential BGP route leaks or hijacks for a prefix using RIPE Stat
+    BGP-state data.
+
+    Checks for:
+    - Multiple distinct origin ASNs (possible hijack — two ASNs claiming the same prefix)
+    - AS-path loops (valley-free violations — a transit ASN re-exporting a learned route)
+
+    Args:
+        params (RouteLeakInput):
+            - prefix (str): CIDR prefix e.g. '1.1.1.0/24'
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Leak detection result with confidence, suspect ASNs, and anomalous AS paths.
+    """
+    result = await rir_client.detect_route_leak(params.prefix)
+    md  = format_route_leak_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 30 — BGP Looking Glass  [Sprint 4 / D4]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="rir_looking_glass",
+    annotations={
+        "title":           "BGP Looking Glass — AS Paths from RIPE RIS",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def rir_looking_glass(params: LookingGlassInput) -> str:
+    """
+    Show BGP routing table entries for a prefix as seen from RIPE RIS
+    (Route Information Service) collectors around the world.
+
+    Unlike BGP visibility (which answers *whether* a route exists), a looking
+    glass shows *how* the route is announced — the actual AS paths from
+    different geographic vantage points.
+
+    Args:
+        params (LookingGlassInput):
+            - prefix (str): CIDR prefix e.g. '1.1.1.0/24'
+            - vantage_points (int): Max entries to return (default 10, max 50)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: AS paths per RIPE RIS collector with region and BGP community values.
+    """
+    result = await rir_client.get_looking_glass(params.prefix, params.vantage_points)
+    md  = format_looking_glass_md(result)
+    jsn = to_json(result)
+    return jsn if params.response_format == ResponseFormat.JSON else md
+
+
+# ──────────────────────────────────────────────────────────────
+# Tool 31 — Route Stability  [Sprint 4 / D5]
+# ──────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="rir_route_stability",
+    annotations={
+        "title":           "BGP Route Flap / Stability Analysis",
+        "readOnlyHint":    True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   True,
+    },
+)
+async def rir_route_stability(params: RouteStabilityInput) -> str:
+    """
+    Analyse BGP route stability for a prefix over a configurable time window
+    using RIPE Stat routing-history data.
+
+    A stable route has no state changes (no withdrawal/re-announcement cycles).
+    Repeated flapping can indicate hardware failure, misconfiguration, or DDoS
+    and causes router CPU load and convergence delays for peers.
+
+    Args:
+        params (RouteStabilityInput):
+            - prefix (str): CIDR prefix e.g. '1.1.1.0/24'
+            - hours (int): Analysis window in hours (default 24, max 168 = 7 days)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Stability score (0–100), state change count, uptime %, and event timeline.
+    """
+    result = await rir_client.get_route_stability(params.prefix, params.hours)
+    md  = format_route_stability_md(result)
     jsn = to_json(result)
     return jsn if params.response_format == ResponseFormat.JSON else md
 

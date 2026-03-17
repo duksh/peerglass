@@ -29,7 +29,11 @@ from models import RIRName, RIRQueryResult, RPKIResult, RPKIValidity, \
     OrgResource, HistoricalEvent, PrefixHistoryResult, TransferEvent, TransferDetectResult, \
     RIRDelegationStats, GlobalIPv4Stats, IPv4DelegatedBlock, RelatedPrefix, PrefixOverviewResult, \
     IXPRecord, PeeringInfoResult, IXPLookupResult, NetworkHealthResult, \
-    ChangeMonitorResult, FieldDelta
+    ChangeMonitorResult, FieldDelta, \
+    IRRResult, IRRRouteObject, \
+    RouteLeakResult, RouteLeakPath, \
+    LookingGlassResult, LookingGlassEntry, \
+    RouteStabilityResult, RouteEvent
 
 
 # ──────────────────────────────────────────────────────────────
@@ -2859,3 +2863,331 @@ async def passive_dns(inp: PassiveDNSInput) -> PassiveDNSResult:
         query_starttime=data_block.get("query_starttime"),
         query_endtime=data_block.get("query_endtime"),
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# Sprint 4 — BGP Depth
+# ──────────────────────────────────────────────────────────────
+
+# IRR sources we consider "well-known" for coverage reporting
+_KNOWN_IRR_SOURCES = ["RIPE", "RADB", "ARIN", "APNIC", "LACNIC", "AFRINIC", "NTTCOM", "LEVEL3"]
+
+# RIPE RIS collector → geographic region
+_RRC_REGIONS: dict[str, str] = {
+    "RRC00": "Amsterdam, NL",    "RRC01": "London, UK",
+    "RRC03": "Amsterdam, NL",    "RRC04": "Geneva, CH",
+    "RRC05": "Vienna, AT",       "RRC06": "Otemachi, JP",
+    "RRC07": "Stockholm, SE",    "RRC10": "Milan, IT",
+    "RRC11": "New York, US",     "RRC12": "Frankfurt, DE",
+    "RRC13": "Moscow, RU",       "RRC14": "Palo Alto, US",
+    "RRC15": "São Paulo, BR",    "RRC16": "Miami, US",
+    "RRC18": "Barcelona, ES",    "RRC19": "Johannesburg, ZA",
+    "RRC20": "Zurich, CH",       "RRC21": "Paris, FR",
+    "RRC22": "Bucharest, RO",    "RRC23": "Singapore, SG",
+    "RRC24": "Montevideo, UY",   "RRC25": "Amsterdam, NL",
+    "RRC26": "Dubai, UAE",
+}
+
+
+# ── D1 — IRR Validation ───────────────────────────────────────
+
+async def check_irr(prefix: str, asn: str) -> IRRResult:
+    """
+    Query IRRExplorer for route objects covering *prefix* and check whether
+    they are consistent with *asn* as the legitimate origin.
+    """
+    import re as _re
+    asn_norm = _re.sub(r"(?i)^as", "", asn.strip())
+    asn_str  = f"AS{asn_norm}"
+
+    import cache as _cache
+    ck  = _cache.make_irr_key(prefix, asn_norm)
+    hit = _cache.get(ck)
+    if hit:
+        return IRRResult.model_validate(hit)
+
+    url = f"https://irrexplorer.nlnog.net/api/prefixes/prefix/{prefix}"
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+            r = await client.get(url)
+            if r.status_code == 404:
+                result = IRRResult(prefix=prefix, asn=asn_str, missing_irr_sources=list(_KNOWN_IRR_SOURCES))
+                _cache.set(ck, result.model_dump(), _cache.TTL_IRR)
+                return result
+            r.raise_for_status()
+            items = r.json()
+    except httpx.TimeoutException:
+        return IRRResult(prefix=prefix, asn=asn_str, errors=["Request timed out querying IRRExplorer"])
+    except Exception as exc:
+        return IRRResult(prefix=prefix, asn=asn_str, errors=[str(exc)])
+
+    route_objects: list[IRRRouteObject] = []
+    sources_found: set[str] = set()
+
+    for item in (items if isinstance(items, list) else [items]):
+        # IRRExplorer API: {"prefix": ..., "irrRoutes": {"RIPE": [{"asn": 13335, "prefix": "..."}], ...}, "bgpOrigins": [...]}
+        irr_routes: dict = item.get("irrRoutes", {})
+        for src, routes in irr_routes.items():
+            sources_found.add(src)
+            for obj in (routes if isinstance(routes, list) else []):
+                obj_asn = str(obj.get("asn", obj.get("origin", "")))
+                route_objects.append(IRRRouteObject(
+                    irr_source=src,
+                    route=obj.get("prefix", prefix),
+                    origin_asn=f"AS{obj_asn}",
+                    matches_query_asn=(obj_asn == asn_norm),
+                ))
+
+    consistent = bool(route_objects) and all(o.matches_query_asn for o in route_objects)
+    missing    = [s for s in _KNOWN_IRR_SOURCES if s not in sources_found]
+
+    result = IRRResult(
+        prefix=prefix,
+        asn=asn_str,
+        route_objects=route_objects,
+        consistent=consistent,
+        irr_sources_found=sorted(sources_found),
+        missing_irr_sources=missing,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_IRR)
+    return result
+
+
+# ── D3 — Route Leak / Hijack Detection ───────────────────────
+
+async def detect_route_leak(prefix: str) -> RouteLeakResult:
+    """
+    Detect potential BGP route leaks or hijacks for *prefix* by examining
+    BGP state from RIPE Stat and looking for:
+      • Multiple distinct origin ASNs (possible hijack)
+      • AS-path loops — an ASN appearing twice (valley-free violation)
+    """
+    import cache as _cache
+    ck  = _cache.make_route_leak_key(prefix)
+    hit = _cache.get(ck)
+    if hit:
+        return RouteLeakResult.model_validate(hit)
+
+    url = f"https://stat.ripe.net/data/bgp-state/data.json?resource={prefix}"
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json().get("data", {})
+    except httpx.TimeoutException:
+        return RouteLeakResult(prefix=prefix, errors=["RIPE Stat timed out"])
+    except Exception as exc:
+        return RouteLeakResult(prefix=prefix, errors=[str(exc)])
+
+    # Parse all AS paths from RRC peers
+    all_as_paths: list[list[str]] = []
+    for rrc in data.get("rrcs", []):
+        for peer in rrc.get("peers", []):
+            raw = peer.get("as_path", "")
+            path = raw.split() if isinstance(raw, str) else [str(h) for h in raw]
+            if path:
+                all_as_paths.append(path)
+
+    origin_asns: set[str] = set()
+    suspect_asns: set[str] = set()
+    affected_paths: list[RouteLeakPath] = []
+    collector_map: dict[str, str] = {}
+    for rrc in data.get("rrcs", []):
+        rrc_id = rrc.get("rrc", "")
+        for peer in rrc.get("peers", []):
+            raw = peer.get("as_path", "")
+            path = raw.split() if isinstance(raw, str) else [str(h) for h in raw]
+            if not path:
+                continue
+            origin_asns.add(path[-1])
+            # Detect AS-path loop (same ASN twice = valley-free violation)
+            seen_in_path: dict[str, int] = {}
+            for a in path:
+                seen_in_path[a] = seen_in_path.get(a, 0) + 1
+            loops = [a for a, c in seen_in_path.items() if c > 1]
+            if loops and len(affected_paths) < 10:
+                for la in loops:
+                    suspect_asns.add(la)
+                affected_paths.append(RouteLeakPath(
+                    suspect_asn=loops[0],
+                    as_path=path,
+                    collector=rrc_id,
+                ))
+
+    # Multiple distinct origins = potential hijack
+    if len(origin_asns) > 1 and not suspect_asns:
+        confidence  = "medium"
+        leak_detected = True
+        suspect_asns = origin_asns
+    elif suspect_asns:
+        confidence  = "high"
+        leak_detected = True
+    else:
+        confidence  = "none"
+        leak_detected = False
+
+    result = RouteLeakResult(
+        prefix=prefix,
+        leak_detected=leak_detected,
+        confidence=confidence,
+        suspect_asns=sorted(suspect_asns),
+        affected_paths=affected_paths,
+        origin_asns=sorted(origin_asns),
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_ROUTE_LEAK)
+    return result
+
+
+# ── D4 — BGP Looking Glass ────────────────────────────────────
+
+async def get_looking_glass(prefix: str, vantage_points: int = 10) -> LookingGlassResult:
+    """
+    Return BGP routing table entries for *prefix* from RIPE Stat BGP-state,
+    showing AS paths and communities as seen by RIS route collectors.
+    """
+    import datetime as _dt
+    import cache as _cache
+
+    ck  = _cache.make_looking_glass_key(prefix, vantage_points)
+    hit = _cache.get(ck)
+    if hit:
+        return LookingGlassResult.model_validate(hit)
+
+    url = f"https://stat.ripe.net/data/bgp-state/data.json?resource={prefix}"
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json().get("data", {})
+    except httpx.TimeoutException:
+        return LookingGlassResult(prefix=prefix, errors=["RIPE Stat timed out"])
+    except Exception as exc:
+        return LookingGlassResult(prefix=prefix, errors=[str(exc)])
+
+    entries: list[LookingGlassEntry] = []
+    seen_paths: set[str] = set()
+
+    for rrc in data.get("rrcs", []):
+        collector = rrc.get("rrc", "")
+        region    = _RRC_REGIONS.get(collector, "Unknown")
+        for peer in rrc.get("peers", []):
+            peer_asn = str(peer.get("asn", ""))
+            raw_path = peer.get("as_path", "")
+            as_path  = raw_path.split() if isinstance(raw_path, str) else [str(h) for h in raw_path]
+            comms    = peer.get("community", [])
+            comm_list = [
+                f"{c[0]}:{c[1]}" if isinstance(c, (list, tuple)) and len(c) == 2 else str(c)
+                for c in comms
+            ][:5]
+
+            path_key = " ".join(as_path)
+            if path_key and path_key not in seen_paths:
+                seen_paths.add(path_key)
+                entries.append(LookingGlassEntry(
+                    collector=collector,
+                    peer_asn=peer_asn,
+                    as_path=as_path,
+                    communities=comm_list,
+                    region=region,
+                ))
+                if len(entries) >= vantage_points:
+                    break
+        if len(entries) >= vantage_points:
+            break
+
+    now_str = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = LookingGlassResult(
+        prefix=prefix,
+        entries=entries,
+        unique_as_paths=len(seen_paths),
+        queried_at=now_str,
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_LOOKING_GLASS)
+    return result
+
+
+# ── D5 — Route Stability / Flap Analysis ─────────────────────
+
+async def get_route_stability(prefix: str, hours: int = 24) -> RouteStabilityResult:
+    """
+    Analyse BGP route stability for *prefix* over the last *hours* hours by
+    parsing RIPE Stat routing-history timelines and counting state transitions.
+    """
+    import datetime as _dt
+    import cache as _cache
+
+    ck  = _cache.make_route_stability_key(prefix, hours)
+    hit = _cache.get(ck)
+    if hit:
+        return RouteStabilityResult.model_validate(hit)
+
+    now_dt   = _dt.datetime.now(_dt.timezone.utc)
+    start_dt = now_dt - _dt.timedelta(hours=hours)
+    url = (
+        "https://stat.ripe.net/data/routing-history/data.json"
+        f"?resource={prefix}"
+        f"&starttime={start_dt.strftime('%Y-%m-%dT%H:%M:%S')}"
+        f"&endtime={now_dt.strftime('%Y-%m-%dT%H:%M:%S')}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json().get("data", {})
+    except httpx.TimeoutException:
+        return RouteStabilityResult(prefix=prefix, hours_analyzed=hours, errors=["RIPE Stat timed out"])
+    except Exception as exc:
+        return RouteStabilityResult(prefix=prefix, hours_analyzed=hours, errors=[str(exc)])
+
+    events: list[RouteEvent] = []
+    state_changes = 0
+
+    for origin_entry in data.get("by_origin", []):
+        for prefix_entry in origin_entry.get("prefixes", []):
+            timelines = prefix_entry.get("timelines", [])
+            prev_end: Optional[str] = None
+            for tl in timelines:
+                start_ts = tl.get("starttime", "")
+                end_ts   = tl.get("endtime", "")
+                if prev_end and prev_end < start_ts:
+                    # Gap between consecutive timeline windows = withdrawal then re-announcement
+                    events.append(RouteEvent(timestamp=prev_end,   event_type="withdrawn"))
+                    events.append(RouteEvent(timestamp=start_ts,   event_type="announced"))
+                    state_changes += 2
+                elif not prev_end:
+                    events.append(RouteEvent(timestamp=start_ts,   event_type="announced"))
+                prev_end = end_ts
+
+    events.sort(key=lambda e: e.timestamp)
+
+    # Stability score: lose 10 points per state change, floor 0
+    stability_score = max(0.0, 100.0 - state_changes * 10.0)
+    # Uptime: proportion of time announced vs the whole window
+    # Approximate: sum up timeline durations / total window
+    total_secs = hours * 3600
+    announced_secs = 0.0
+    for origin_entry in data.get("by_origin", []):
+        for prefix_entry in origin_entry.get("prefixes", []):
+            for tl in prefix_entry.get("timelines", []):
+                try:
+                    s = _dt.datetime.fromisoformat(tl["starttime"].replace("Z", "+00:00"))
+                    e = _dt.datetime.fromisoformat(tl["endtime"].replace("Z", "+00:00"))
+                    announced_secs = max(announced_secs, (e - s).total_seconds())
+                except Exception:
+                    pass
+    uptime_pct = min(100.0, (announced_secs / total_secs * 100)) if total_secs > 0 else 100.0
+    if state_changes == 0 and not events:
+        uptime_pct = 100.0   # No history data = assume stable
+
+    result = RouteStabilityResult(
+        prefix=prefix,
+        hours_analyzed=hours,
+        stability_score=round(stability_score, 1),
+        state_changes=state_changes,
+        uptime_pct=round(uptime_pct, 1),
+        is_stable=state_changes < 3,
+        events=events[:20],
+    )
+    _cache.set(ck, result.model_dump(), _cache.TTL_ROUTE_STABILITY)
+    return result

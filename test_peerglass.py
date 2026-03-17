@@ -109,19 +109,19 @@ else:
 
 
 # ── 7. TOOL COUNT ────────────────────────────────────────────
-print("\n7. TOOL COUNT — 27 @mcp.tool() decorators in server.py")
+print("\n7. TOOL COUNT — 31 @mcp.tool() decorators in server.py")
 # Decorator is @mcp.tool( with description kwarg on next line
 tools_found = re.findall(r"@mcp\.tool\(", server_src)
 count = len(tools_found)
-if count == 27:
+if count == 31:
     print(f"   ✅ {count} @mcp.tool() decorators found")
 else:
-    print(f"   ❌ Expected 27, found {count}")
+    print(f"   ❌ Expected 31, found {count}")
     errors.append(f"tool_count:{count}")
 
 
 # ── 8. REST ENDPOINTS ────────────────────────────────────────
-print("\n8. REST API — all 25 endpoints present in api.py")
+print("\n8. REST API — all 29 endpoints present in api.py")
 api_src = open("api.py").read()
 routes = [
     "/v1/ip/{ip}",           "/v1/asn/{asn}",
@@ -137,6 +137,8 @@ routes = [
     "/v1/dns/email/{domain}",    "/v1/dns/propagation/{domain}",
     "/v1/tls/{hostname}",        "/v1/ct/{domain}",
     "/v1/threat/{ip}",           "/v1/pdns/{resource}",
+    "/v1/irr",                   "/v1/route-leak/",
+    "/v1/looking-glass/",        "/v1/stability/",
 ]
 for r in routes:
     if r in api_src:
@@ -157,9 +159,9 @@ try:
     r = client.get("/")
     assert r.status_code == 200, f"Root returned {r.status_code}"
     data = r.json()
-    assert data["tools"] == 27, f"Root shows {data['tools']} tools not 27"
+    assert data["tools"] == 31, f"Root shows {data['tools']} tools not 31"
     assert data["name"] == "PeerGlass API", f"Name is {data['name']}"
-    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=27")
+    print(f"   ✅ GET /  → 200, name=PeerGlass API, tools=31")
 
     r = client.get("/v1/meta/cache")
     assert r.status_code == 200
@@ -196,7 +198,7 @@ readme = open("README.md").read()
 
 must_contain = [
     ("PeerGlass",              "Product name present"),
-    ("27 tools",               "Correct tool count (27)"),
+    ("31 tools",               "Correct tool count (31)"),
     ("RDAP (RFC 7480",         "RDAP RFC reference"),
     ("Protocol note",          "WHOIS→RDAP explanation block"),
     ("peerglass",              "MCP config uses peerglass"),
@@ -501,6 +503,88 @@ for k in sprint3_ttls:
         errors.append(f"sprint3:cache:{k}")
 
 
+# ── SPRINT 4 — BGP Depth (D1, D3, D4, D5) ────────────────────
+print()
+print("14. SPRINT 4 — IRR Validation (D1), Route Leak (D3), Looking Glass (D4), Stability (D5)")
+
+# rir_client functions
+client_src4 = open("rir_client.py").read()
+sprint4_fns = ["check_irr", "detect_route_leak", "get_looking_glass", "get_route_stability"]
+for fn in sprint4_fns:
+    if f"async def {fn}" in client_src4:
+        print(f"   ✅ Sprint 4: rir_client.{fn} present")
+    else:
+        print(f"   ❌ Sprint 4: rir_client.{fn} MISSING")
+        errors.append(f"sprint4:fn:{fn}")
+
+# Models
+from models import (
+    IRRCheckInput, IRRRouteObject, IRRResult,
+    RouteLeakInput, RouteLeakPath, RouteLeakResult,
+    LookingGlassInput, LookingGlassEntry, LookingGlassResult,
+    RouteStabilityInput, RouteEvent, RouteStabilityResult,
+)
+sprint4_models = [
+    ("IRRCheckInput",       IRRCheckInput),
+    ("IRRResult",           IRRResult),
+    ("RouteLeakInput",      RouteLeakInput),
+    ("RouteLeakResult",     RouteLeakResult),
+    ("LookingGlassInput",   LookingGlassInput),
+    ("LookingGlassResult",  LookingGlassResult),
+    ("RouteStabilityInput", RouteStabilityInput),
+    ("RouteStabilityResult",RouteStabilityResult),
+]
+for name, cls in sprint4_models:
+    try:
+        cls.model_fields  # Pydantic v2 check
+        print(f"   ✅ Sprint 4: model {name} importable")
+    except Exception as e:
+        print(f"   ❌ Sprint 4: model {name} BROKEN: {e}")
+        errors.append(f"sprint4:model:{name}")
+
+# Formatters
+from formatters import (
+    format_irr_result_md, format_route_leak_md,
+    format_looking_glass_md, format_route_stability_md,
+)
+for fn_name in ["format_irr_result_md", "format_route_leak_md",
+                "format_looking_glass_md", "format_route_stability_md"]:
+    print(f"   ✅ Sprint 4: formatter {fn_name} importable")
+
+# MCP tools
+server_src4 = open("server.py").read()
+sprint4_tools = [
+    "rir_check_irr", "rir_detect_route_leak",
+    "rir_looking_glass", "rir_route_stability",
+]
+for tool in sprint4_tools:
+    if f'name="{tool}"' in server_src4:
+        print(f"   ✅ Sprint 4: MCP tool {tool} present")
+    else:
+        print(f"   ❌ Sprint 4: MCP tool {tool} MISSING")
+        errors.append(f"sprint4:mcp:{tool}")
+
+# REST routes
+api_src4 = open("api.py").read()
+sprint4_routes = ["/v1/irr", "/v1/route-leak/", "/v1/looking-glass/", "/v1/stability/"]
+for route in sprint4_routes:
+    if route in api_src4:
+        print(f"   ✅ Sprint 4: REST route {route} present")
+    else:
+        print(f"   ❌ Sprint 4: REST route {route} MISSING")
+        errors.append(f"sprint4:route:{route}")
+
+# Cache TTLs
+cache_src4 = open("cache.py").read()
+sprint4_ttls = ["TTL_IRR", "TTL_ROUTE_LEAK", "TTL_LOOKING_GLASS", "TTL_ROUTE_STABILITY"]
+for k in sprint4_ttls:
+    if k in cache_src4:
+        print(f"   ✅ Sprint 4: cache.{k} present")
+    else:
+        print(f"   ❌ Sprint 4: cache.{k} MISSING")
+        errors.append(f"sprint4:cache:{k}")
+
+
 # ── SUMMARY ──────────────────────────────────────────────────
 print()
 print("=" * 60)
@@ -508,8 +592,8 @@ if not errors:
     print("✅ ALL TESTS PASSED — 0 errors")
     print()
     print("  Python files:         7  (all compile clean)")
-    print("  MCP tools:            27")
-    print("  REST endpoints:       25")
+    print("  MCP tools:            31")
+    print("  REST endpoints:       29")
     print("  Protocol:             RDAP throughout (RFC 7480-7484)")
     print("  Branding:             PeerGlass throughout")
     print("  historical-whois:     correctly attributed to RIPE Stat API naming")
