@@ -2060,12 +2060,12 @@ async def _dns_query(name: str, rdtype: str, resolver: Optional[dns.asyncresolve
 
 # ── E1 — Forward & Reverse DNS Resolution ────────────────────
 
-async def dns_resolve(target: str) -> DNSResolveResult:
+async def dns_resolve(inp: "DNSResolveInput") -> DNSResolveResult:
     """
     Resolve A/AAAA records for a domain, or PTR records for an IP address.
     For IP inputs, also correlates with RDAP owner to flag PTR mismatches.
     """
-    target = target.strip()
+    target = inp.target.strip()
     is_ip = False
     errors: list[str] = []
 
@@ -2126,12 +2126,12 @@ async def dns_resolve(target: str) -> DNSResolveResult:
 
 # ── E2 — Full DNS Record Enumeration ─────────────────────────
 
-async def dns_enumerate(domain: str) -> DNSEnumerateResult:
+async def dns_enumerate(inp: "DNSEnumerateInput") -> DNSEnumerateResult:
     """
     Fetch all common DNS record types (A, AAAA, MX, NS, SOA, TXT, CAA,
     DNSKEY, SRV, CNAME) for a domain. Flags SPF and DMARC values from TXT.
     """
-    domain = domain.strip().lower()
+    domain = inp.domain.strip().lower()
     record_types = ["A", "AAAA", "MX", "NS", "SOA", "TXT", "CAA", "DNSKEY", "SRV", "CNAME"]
     records: dict[str, list[DNSRecord]] = {}
     errors: list[str] = []
@@ -2192,7 +2192,7 @@ async def dns_enumerate(domain: str) -> DNSEnumerateResult:
 
 # ── E3 — DNSSEC Chain Validation ─────────────────────────────
 
-async def dns_dnssec(domain: str) -> DNSSECResult:
+async def dns_dnssec(inp: "DNSSECInput") -> DNSSECResult:
     """
     Check DNSSEC deployment for a domain.
     Returns SECURE / INSECURE / BOGUS / INDETERMINATE.
@@ -2202,7 +2202,7 @@ async def dns_dnssec(domain: str) -> DNSSECResult:
     BOGUS:         Records present but RRSIG expiry issues or mismatch.
     INDETERMINATE: Cannot determine status (query failures).
     """
-    domain = domain.strip().lower()
+    domain = inp.domain.strip().lower()
     errors: list[str] = []
     has_dnskey = False
     has_rrsig = False
@@ -2268,12 +2268,12 @@ async def dns_dnssec(domain: str) -> DNSSECResult:
 
 # ── E4 — DNSBL Blocklist Checking ────────────────────────────
 
-async def dns_dnsbl(ip: str) -> DNSBLResult:
+async def dns_dnsbl(inp: "DNSBLInput") -> DNSBLResult:
     """
     Check an IPv4 address against 30 DNS blocklists in parallel.
     Uses pure DNS A-record lookups — no external APIs or keys needed.
     """
-    ip = ip.strip()
+    ip = inp.ip.strip()
     errors: list[str] = []
 
     # Reverse the IP octets for DNSBL queries: 1.2.3.4 → 4.3.2.1
@@ -2324,12 +2324,12 @@ async def dns_dnsbl(ip: str) -> DNSBLResult:
 
 # ── E5 — Email Security Record Analysis ──────────────────────
 
-async def dns_email_security(domain: str) -> EmailSecurityResult:
+async def dns_email_security(inp: "EmailSecurityInput") -> EmailSecurityResult:
     """
     Comprehensive email security audit: SPF, DMARC, DKIM, MX.
     All pure DNS — no external APIs or keys needed.
     """
-    domain = domain.strip().lower()
+    domain = inp.domain.strip().lower()
     errors: list[str] = []
     recommendations: list[str] = []
 
@@ -2455,13 +2455,13 @@ async def dns_email_security(domain: str) -> EmailSecurityResult:
 
 # ── E7 — DNS Propagation Check ───────────────────────────────
 
-async def dns_propagation(domain: str, record_type: str = "A") -> DNSPropagationResult:
+async def dns_propagation(inp: "DNSPropagationInput") -> DNSPropagationResult:
     """
     Query the same domain from 10 geographically distributed public
     resolvers and compare results to detect propagation lag.
     """
-    domain = domain.strip().lower()
-    record_type = record_type.upper()
+    domain = inp.domain.strip().lower()
+    record_type = inp.record_type.upper()
     errors: list[str] = []
     entries: list[PropagationEntry] = []
 

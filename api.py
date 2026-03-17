@@ -229,8 +229,8 @@ async def meta_cache(request: Request):
 @limiter.limit(_DEFAULT_RATE)
 async def meta_status(request: Request):
     """Pings all 5 RIR RDAP servers and returns their status."""
-    statuses = await rir_client.check_all_rir_status()
-    return [s.model_dump() for s in statuses]
+    statuses = await rir_client.get_rir_server_status()
+    return statuses
 
 
 # ──────────────────────────────────────────────────────────────
