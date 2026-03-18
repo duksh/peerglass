@@ -6,7 +6,7 @@
 #   2. Go to https://dashboard.render.com → New → Blueprint
 #   3. Connect your GitHub repo — Render auto-reads this file
 #   4. Set GREYNOISE_API_KEY in the dashboard (optional, for threat intel)
-#   5. Done — API is live at https://peerglass-api.onrender.com
+#   5. Done — API is live at https://peerglass.onrender.com
 #
 # Architecture on Render:
 #   ┌─────────────────────────────────────────────┐
@@ -28,7 +28,7 @@
 services:
   # ── REST API ─────────────────────────────────────────────────
   - type: web
-    name: peerglass-api
+    name: peerglass-api-v1
     runtime: python
     plan: starter                       # always-on, no cold starts
     region: oregon                      # closest to RIR servers (ARIN/APNIC)
