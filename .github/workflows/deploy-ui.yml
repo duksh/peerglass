@@ -62,3 +62,28 @@ jobs:
       - name: Deploy
         id: deploy
         uses: actions/deploy-pages@v4
+
+  smoke-test:
+    name: Smoke Test API Backend
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Render cold start and verify API health
+        run: |
+          echo "Probing https://peerglass-api.onrender.com/v1/meta/status ..."
+          for i in $(seq 1 8); do
+            STATUS=$(curl -s -o /tmp/api_response.txt -w "%{http_code}" \
+              --max-time 20 \
+              https://peerglass-api.onrender.com/v1/meta/status || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "API is healthy."
+              cat /tmp/api_response.txt
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "ERROR: API did not return 200 after 8 attempts (~2 minutes)."
+          echo "Last response:"
+          cat /tmp/api_response.txt || true
+          exit 1

@@ -8,7 +8,7 @@ import CountryDashboard from './components/CountryDashboard'
 export default function App() {
   const [activeTab, setActiveTab] = useState('auto')
   const [activeTool, setActiveTool] = useState('auto')
-  const { loading, result, error, query, clear } = usePeerGlass()
+  const { loading, warmingUp, result, error, query, clear } = usePeerGlass()
 
   const currentTab = TABS.find(t => t.id === activeTab) ?? TABS[0]
   const currentTool = currentTab.tools.find(t => t.id === activeTool) ?? currentTab.tools[0]
@@ -75,7 +75,7 @@ export default function App() {
             </div>
 
             {/* Result */}
-            <ResultPanel result={result} error={error} loading={loading} />
+            <ResultPanel result={result} error={error} loading={loading} warmingUp={warmingUp} />
           </>
         )}
       </main>

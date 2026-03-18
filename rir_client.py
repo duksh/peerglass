@@ -2693,6 +2693,14 @@ async def ct_logs(inp: CTLogInput) -> CTLogResult:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(url, headers={"User-Agent": _USER_AGENT})
+            if r.status_code == 404:
+                # crt.sh returns 404 when its PostgreSQL query times out for
+                # high-volume domains (e.g. cloudflare.com). Treat as no data
+                # rather than a hard error so callers can handle gracefully.
+                return CTLogResult(
+                    domain=inp.domain,
+                    warning="crt.sh query timed out (HTTP 404) — try a more specific subdomain or retry later",
+                )
             if r.status_code != 200:
                 return CTLogResult(
                     domain=inp.domain,

@@ -1026,34 +1026,42 @@ def format_change_monitor_md(result: ChangeMonitorResult) -> str:
 def format_dns_resolve_md(result: DNSResolveResult) -> str:
     """Render DNS resolve/PTR result as Markdown."""
     lines: list[str] = []
-    lines.append(f"## DNS Resolution: `{result.query}`\n\n")
-    lines.append(f"- **Type:** {result.query_type}\n")
-    lines.append(f"- **Resolver:** {result.resolver}\n")
-    lines.append(f"- **Records found:** {len(result.records)}\n\n")
+    lookup_type = "Reverse (PTR)" if result.is_ip else "Forward"
+    lines.append(f"## DNS Resolution: `{result.target}`\n\n")
+    lines.append(f"- **Type:** {lookup_type}\n")
 
-    if result.records:
-        lines.append("### Records\n\n")
-        lines.append("| Type | TTL | Value |\n")
-        lines.append("|------|-----|-------|\n")
-        for rec in result.records:
-            lines.append(f"| {rec.record_type} | {rec.ttl}s | `{rec.value}` |\n")
+    if result.is_ip:
+        if result.ptr_records:
+            lines.append(f"- **PTR records:** {', '.join(f'`{r}`' for r in result.ptr_records)}\n")
+        else:
+            lines.append("- **PTR records:** none found\n")
+    else:
+        total = len(result.a_records) + len(result.aaaa_records)
+        lines.append(f"- **Records found:** {total}\n")
+
+    lines.append("\n")
+
+    if result.a_records:
+        lines.append("### IPv4 (A)\n\n")
+        for addr in result.a_records:
+            lines.append(f"- `{addr}`\n")
         lines.append("\n")
 
-    if result.rdap_correlation:
-        c = result.rdap_correlation
-        lines.append("### RDAP Correlation\n\n")
-        if c.get("holder"):
-            lines.append(f"- **Holder:** {c['holder']}\n")
-        if c.get("country"):
-            lines.append(f"- **Country:** {c['country']}\n")
-        if c.get("rir"):
-            lines.append(f"- **RIR:** {c['rir']}\n")
-        if c.get("prefix"):
-            lines.append(f"- **Covering prefix:** `{c['prefix']}`\n")
+    if result.aaaa_records:
+        lines.append("### IPv6 (AAAA)\n\n")
+        for addr in result.aaaa_records:
+            lines.append(f"- `{addr}`\n")
         lines.append("\n")
 
-    if result.error:
-        lines.append(f"> ⚠️ **Error:** {result.error}\n\n")
+    if result.rdap_org:
+        lines.append(f"### RDAP Owner\n\n- **Organization:** {result.rdap_org}\n")
+        if result.rdap_mismatch:
+            lines.append("- ⚠️ PTR hostname does not match RDAP owner\n")
+        lines.append("\n")
+
+    if result.errors:
+        for err in result.errors:
+            lines.append(f"> ⚠️ **Error:** {err}\n\n")
 
     return "".join(lines)
 

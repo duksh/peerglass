@@ -3,6 +3,7 @@ import * as api from '../api/client'
 
 export type QueryState = {
   loading: boolean
+  warmingUp: boolean
   result: string | null
   error: string | null
 }
@@ -22,10 +23,13 @@ export function detectType(input: string): ResourceType {
 }
 
 export function usePeerGlass() {
-  const [state, setState] = useState<QueryState>({ loading: false, result: null, error: null })
+  const [state, setState] = useState<QueryState>({ loading: false, warmingUp: false, result: null, error: null })
 
   const query = useCallback(async (input: string, tool: string) => {
-    setState({ loading: true, result: null, error: null })
+    setState({ loading: true, warmingUp: false, result: null, error: null })
+    api.setRetryCallback(() => {
+      setState(prev => ({ ...prev, warmingUp: true }))
+    })
     try {
       const s = input.trim()
       let result: string
@@ -99,14 +103,25 @@ export function usePeerGlass() {
         }
       }
 
-      setState({ loading: false, result, error: null })
+      setState({ loading: false, warmingUp: false, result, error: null })
     } catch (err) {
-      setState({ loading: false, result: null, error: String(err) })
+      const msg = String(err)
+      const isNetworkError = msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('fetch')
+      setState({
+        loading: false,
+        warmingUp: false,
+        result: null,
+        error: isNetworkError
+          ? 'Backend unreachable — the API may be cold-starting on Render (free tier). Please try again in a moment.'
+          : msg,
+      })
+    } finally {
+      api.setRetryCallback(null)
     }
   }, [])
 
   const clear = useCallback(() => {
-    setState({ loading: false, result: null, error: null })
+    setState({ loading: false, warmingUp: false, result: null, error: null })
   }, [])
 
   return { ...state, query, clear }

@@ -4,14 +4,19 @@ interface ResultPanelProps {
   result: string | null
   error: string | null
   loading: boolean
+  warmingUp?: boolean
 }
 
-export default function ResultPanel({ result, error, loading }: ResultPanelProps) {
+export default function ResultPanel({ result, error, loading, warmingUp }: ResultPanelProps) {
   if (loading) {
     return (
       <div className="terminal-card p-6 flex items-center gap-3 text-terminal-muted">
         <span className="animate-spin">⏳</span>
-        <span className="font-mono text-sm">Querying internet resources...</span>
+        <span className="font-mono text-sm">
+          {warmingUp
+            ? 'Backend warming up on Render — retrying...'
+            : 'Querying internet resources...'}
+        </span>
       </div>
     )
   }

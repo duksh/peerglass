@@ -313,7 +313,12 @@ async def query_ip(
             except Exception:
                 pass
     if not normalized:
-        raise HTTPException(status_code=404, detail=f"No RDAP record found for {ip}")
+        errors = [r.error for r in results if r.error]
+        err_detail = "; ".join(errors) if errors else "all RIRs returned no data"
+        md  = f"## IP Lookup: `{ip}`\n\n> ⚠️ No RDAP record found. {err_detail}\n\n"
+        md += "_This IP may be unallocated, reserved, or all RIR RDAP servers are unreachable._\n"
+        jsn = to_json({"ip": ip, "error": f"No RDAP record found for {ip}", "details": errors})
+        return _resp(md, jsn, format)
 
     md  = format_ip_results_md(ip, normalized, results)
     jsn = to_json({"ip": ip, "results": [r.model_dump(exclude={"data"}) for r in results],
@@ -364,7 +369,12 @@ async def query_asn(
             except Exception:
                 pass
     if not normalized:
-        raise HTTPException(status_code=404, detail=f"No RDAP record found for {asn}")
+        errors = [r.error for r in results if r.error]
+        err_detail = "; ".join(errors) if errors else "all RIRs returned no data"
+        md  = f"## ASN Lookup: `{asn}`\n\n> ⚠️ No RDAP record found. {err_detail}\n\n"
+        md += "_This ASN may be unallocated or all RIR RDAP servers are unreachable._\n"
+        jsn = to_json({"asn": asn, "error": f"No RDAP record found for {asn}", "details": errors})
+        return _resp(md, jsn, format)
 
     md  = format_asn_results_md(asn, normalized, results)
     jsn = to_json({"asn": asn, "results": [r.model_dump(exclude={"data"}) for r in results],
@@ -441,7 +451,7 @@ async def check_rpki(
 
 
 @app.get(
-    "/v1/bgp/{resource}",
+    "/v1/bgp/{resource:path}",
     tags=["Routing Security"],
     summary="Is this prefix/ASN visible in global BGP?",
 )
@@ -546,7 +556,7 @@ async def audit_org(
 # ──────────────────────────────────────────────────────────────
 
 @app.get(
-    "/v1/history/{resource}",
+    "/v1/history/{resource:path}",
     tags=["History"],
     summary="Full registration history for a prefix or ASN",
 )
@@ -575,7 +585,7 @@ async def prefix_history(
 
 
 @app.get(
-    "/v1/transfers/{resource}",
+    "/v1/transfers/{resource:path}",
     tags=["History"],
     summary="Detect cross-org or cross-RIR resource transfers",
 )
@@ -675,7 +685,7 @@ async def ipv4_stats(
 
 
 @app.get(
-    "/v1/overview/{prefix}",
+    "/v1/overview/{prefix:path}",
     tags=["History"],
     summary="Prefix hierarchy: parent blocks, children, and BGP status",
 )
@@ -799,7 +809,7 @@ async def network_health(
 
 
 @app.get(
-    "/v1/monitor/{resource}",
+    "/v1/monitor/{resource:path}",
     tags=["Monitor"],
     summary="Monitor registration + BGP changes between calls",
 )
@@ -864,7 +874,7 @@ async def dns_resolve(
 
     **Examples:** `8.8.8.8`, `cloudflare.com`, `google.com`
     """
-    inp = DNSResolveInput(target=target, record_type=record_type)
+    inp = DNSResolveInput(target=target)
     result = await rir_client.dns_resolve(inp)
     md  = format_dns_resolve_md(result)
     jsn = to_json(result)
@@ -1948,4 +1958,8 @@ async def openai_tools(request: Request):
             },
         },
     ]
-    return {"tools": tools, "count": len(tools), "base_url": "https://api.peerglass.io"}
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        content=tools,
+        headers={"X-Tool-Count": str(len(tools)), "X-Base-URL": "https://peerglass-api.onrender.com"},
+    )
