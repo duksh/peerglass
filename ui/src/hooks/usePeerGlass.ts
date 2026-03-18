@@ -36,7 +36,7 @@ export function usePeerGlass() {
 
       switch (tool) {
         // Registry
-        case 'ip':           result = await api.queryIp(s); break
+        case 'ip':           result = detectType(s) === 'prefix' ? await api.checkBgp(s) : await api.queryIp(s); break
         case 'asn':          result = await api.queryAsn(s); break
         case 'abuse':        result = await api.queryAbuse(s); break
         case 'org':          result = await api.queryOrg(s); break
