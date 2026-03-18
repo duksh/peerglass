@@ -105,6 +105,7 @@ export function usePeerGlass() {
 
       setState({ loading: false, warmingUp: false, result, error: null })
     } catch (err) {
+      console.error('[PeerGlass] query failed:', err)
       const msg = String(err)
       const isNetworkError = msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('fetch')
       setState({
@@ -112,7 +113,7 @@ export function usePeerGlass() {
         warmingUp: false,
         result: null,
         error: isNetworkError
-          ? 'Backend unreachable — the API may be restarting. Please try again in a moment.'
+          ? `Backend unreachable (${msg}) — check browser Console/Network tab for details. The API may be restarting.`
           : msg,
       })
     } finally {
