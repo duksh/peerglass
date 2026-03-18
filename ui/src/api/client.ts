@@ -7,12 +7,33 @@ const BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000').repl
 
 type Format = 'markdown' | 'json'
 
+// Called on each retry attempt so the UI can show a "warming up" message.
+type RetryCallback = (attempt: number, maxAttempts: number) => void
+let _retryCallback: RetryCallback | null = null
+export function setRetryCallback(fn: RetryCallback | null): void { _retryCallback = fn }
+
+// Retries on network failures (TypeError: Failed to fetch) up to MAX_RETRIES times
+// with linear 10 s backoff. HTTP errors are not retried.
+async function fetchWithRetry(url: string, options?: RequestInit): Promise<Response> {
+  const MAX_RETRIES = 3
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fetch(url, options)
+    } catch (err) {
+      if (attempt === MAX_RETRIES) throw err
+      _retryCallback?.(attempt, MAX_RETRIES - 1)
+      await new Promise(r => setTimeout(r, 10_000 * attempt)) // 10 s, 20 s
+    }
+  }
+  throw new Error('unreachable')
+}
+
 async function get(path: string, params: Record<string, string | number | boolean | undefined> = {}, format: Format = 'markdown'): Promise<string> {
   const url = new URL(BASE + path)
   Object.entries({ ...params, format }).forEach(([k, v]) => {
     if (v !== undefined) url.searchParams.set(k, String(v))
   })
-  const res = await fetch(url.toString())
+  const res = await fetchWithRetry(url.toString())
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
   if (format === 'json') return res.text()
   return res.text()
@@ -21,7 +42,7 @@ async function get(path: string, params: Record<string, string | number | boolea
 async function post(path: string, body: unknown, format: Format = 'markdown'): Promise<string> {
   const url = new URL(BASE + path)
   url.searchParams.set('format', format)
-  const res = await fetch(url.toString(), {
+  const res = await fetchWithRetry(url.toString(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
