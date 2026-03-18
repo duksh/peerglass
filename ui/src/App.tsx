@@ -1,4 +1,6 @@
 import { useState } from 'react'
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000').replace(/\/$/, '')
 import { usePeerGlass } from './hooks/usePeerGlass'
 import SearchBar from './components/SearchBar'
 import ResultPanel from './components/ResultPanel'
@@ -37,7 +39,7 @@ export default function App() {
           <div className="flex items-center gap-2 text-xs text-terminal-muted font-mono">
             <span className="hidden sm:inline">RIR · BGP · RPKI · DNS · TLS · Crisis</span>
             <a
-              href="/docs"
+              href={`${API_BASE}/docs`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-terminal-cyan hover:underline"
@@ -85,8 +87,8 @@ export default function App() {
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between text-xs text-terminal-muted font-mono">
           <span>PeerGlass · Internet resource intelligence</span>
           <div className="flex gap-4">
-            <a href="/docs" target="_blank" rel="noopener" className="hover:text-terminal-cyan">Swagger</a>
-            <a href="/redoc" target="_blank" rel="noopener" className="hover:text-terminal-cyan">ReDoc</a>
+            <a href={`${API_BASE}/docs`} target="_blank" rel="noopener" className="hover:text-terminal-cyan">Swagger</a>
+            <a href={`${API_BASE}/redoc`} target="_blank" rel="noopener" className="hover:text-terminal-cyan">ReDoc</a>
             <a href="https://github.com/duksh/peerglass" target="_blank" rel="noopener" className="hover:text-terminal-cyan">GitHub</a>
           </div>
         </div>
