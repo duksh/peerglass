@@ -43,7 +43,7 @@ jobs:
           # Subpath on GitHub Pages: https://duksh.github.io/peerglass/
           VITE_BASE_PATH: /peerglass/
           # Render.com API backend
-          VITE_API_BASE_URL: https://peerglass-api.onrender.com
+          VITE_API_BASE_URL: https://peerglass.onrender.com
         run: npm run build
 
       - name: Upload Pages artifact
@@ -70,11 +70,11 @@ jobs:
     steps:
       - name: Wait for Render cold start and verify API health
         run: |
-          echo "Probing https://peerglass-api.onrender.com/v1/meta/status ..."
+          echo "Probing https://peerglass.onrender.com/v1/meta/status ..."
           for i in $(seq 1 8); do
             STATUS=$(curl -s -o /tmp/api_response.txt -w "%{http_code}" \
               --max-time 20 \
-              https://peerglass-api.onrender.com/v1/meta/status || echo "000")
+              https://peerglass.onrender.com/v1/meta/status || echo "000")
             echo "Attempt $i: HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
               echo "API is healthy."

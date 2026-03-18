@@ -1961,5 +1961,5 @@ async def openai_tools(request: Request):
     from fastapi.responses import JSONResponse
     return JSONResponse(
         content=tools,
-        headers={"X-Tool-Count": str(len(tools)), "X-Base-URL": "https://peerglass-api.onrender.com"},
+        headers={"X-Tool-Count": str(len(tools)), "X-Base-URL": "https://peerglass.onrender.com"},
     )
