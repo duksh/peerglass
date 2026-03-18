@@ -112,7 +112,7 @@ export function usePeerGlass() {
         warmingUp: false,
         result: null,
         error: isNetworkError
-          ? 'Backend unreachable — the API may be cold-starting on Render (free tier). Please try again in a moment.'
+          ? 'Backend unreachable — the API may be restarting. Please try again in a moment.'
           : msg,
       })
     } finally {
