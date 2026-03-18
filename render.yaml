@@ -20,11 +20,7 @@
 #   │  Note: uncomment when Web UI is built        │
 #   └─────────────────────────────────────────────┘
 #
-# IMPORTANT LIMITATIONS on free tier:
-#   - Service SLEEPS after 15 min of inactivity → ~30s cold start
-#   - In-memory cache (cache.py) is wiped on sleep/redeploy
-#   - Change monitor baselines are lost on sleep
-#   - Upgrade to Starter ($7/mo) for always-on with persistent cache
+# Starter plan ($7/mo): always-on, no cold starts, zero-downtime deploys.
 #
 # MCP stdio server (server.py) is NOT deployable here —
 # it runs locally inside Claude Desktop as a stdio subprocess.
@@ -34,18 +30,18 @@ services:
   - type: web
     name: peerglass-api
     runtime: python
-    plan: free                          # upgrade to starter for always-on
+    plan: starter                       # always-on, no cold starts
     region: oregon                      # closest to RIR servers (ARIN/APNIC)
     branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT --workers 2
     healthCheckPath: /v1/meta/status
 
     envVars:
       # CORS — set to your frontend domain in production
       # e.g. "https://your-username.github.io" or "*" for open access
       - key: PEERGLASS_ALLOWED_ORIGINS
-        value: "*"
+        value: "https://duksh.github.io"
 
       # Optional — enables GreyNoise threat classification
       # Free API key: https://www.greynoise.io/plans/community
